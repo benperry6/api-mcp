@@ -18205,14 +18205,26 @@ var cachedOrderDetailData = null;
 function setProductListCache(data) {
   cachedProductListData = data;
 }
+function getProductListCache() {
+  return cachedProductListData;
+}
 function setProductDetailCache(data) {
   cachedProductDetailData = data;
+}
+function getProductDetailCache() {
+  return cachedProductDetailData;
 }
 function setOrderListCache(data) {
   cachedOrderListData = data;
 }
+function getOrderListCache() {
+  return cachedOrderListData;
+}
 function setOrderDetailCache(data) {
   cachedOrderDetailData = data;
+}
+function getOrderDetailCache() {
+  return cachedOrderDetailData;
 }
 var resources = [
   {
@@ -18831,15 +18843,14 @@ function getProductTools() {
       return {
         ...tool,
         annotations,
-        _meta: { ui: { resourceUri: `${PRODUCT_LIST_UI_URI}?t=${ts}_${seq}` } }
+        _meta: { ui: { resourceUri: PRODUCT_LIST_UI_URI } }
       };
     }
     if (tool.name === "show_product_detail") {
-      const pid = lastProductDetailPid;
       return {
         ...tool,
         annotations,
-        _meta: { ui: { resourceUri: `${PRODUCT_DETAIL_UI_URI}${pid ? "?pid=" + encodeURIComponent(pid) + "&" : "?"}t=${ts}_${seq}` } }
+        _meta: { ui: { resourceUri: PRODUCT_DETAIL_UI_URI } }
       };
     }
     return { ...tool, annotations };
@@ -18867,10 +18878,11 @@ async function handleProductTool(name, args) {
       case "get_product_detail":
         return await handleGetProductDetail(args);
       case "show_product_list": {
-        const plUri = `ui://cj-mcp/product-list?t=${Date.now()}`;
+        const listData = getProductListCache();
         return {
           content: [{ type: "text", text: "\u2705 \u5546\u54C1\u5217\u8868\u754C\u9762\u5DF2\u6253\u5F00 / Product list UI opened." }],
-          _meta: { ui: { resourceUri: plUri } }
+          structuredContent: listData ?? {},
+          _meta: { ui: { resourceUri: PRODUCT_LIST_UI_URI } }
         };
       }
       case "show_product_detail": {
@@ -18885,10 +18897,11 @@ async function handleProductTool(name, args) {
         if (detailResult.isError) {
           return detailResult;
         }
-        const pdUri = `ui://cj-mcp/product-detail?t=${Date.now()}`;
+        const detailData = getProductDetailCache();
         return {
           content: [{ type: "text", text: `\u2705 \u5546\u54C1\u8BE6\u60C5\u754C\u9762\u5DF2\u6253\u5F00 / Product detail UI opened. pid: ${pid}` }],
-          _meta: { ui: { resourceUri: pdUri } }
+          structuredContent: detailData ?? {},
+          _meta: { ui: { resourceUri: PRODUCT_DETAIL_UI_URI } }
         };
       }
       case "query_cj_inventory":
@@ -20044,10 +20057,10 @@ function getOrderTools() {
   return orderTools.map((tool) => {
     const annotations = READ_ONLY_ORDER_TOOLS.has(tool.name) ? { readOnlyHint: true } : void 0;
     if (tool.name === "show_order_list") {
-      return { ...tool, annotations, _meta: { ui: { resourceUri: `${ORDER_LIST_UI_URI}?t=${ts}_${seq}` } } };
+      return { ...tool, annotations, _meta: { ui: { resourceUri: ORDER_LIST_UI_URI } } };
     }
     if (tool.name === "show_order_detail") {
-      return { ...tool, annotations, _meta: { ui: { resourceUri: `${ORDER_DETAIL_UI_URI}?t=${ts}_${seq}` } } };
+      return { ...tool, annotations, _meta: { ui: { resourceUri: ORDER_DETAIL_UI_URI } } };
     }
     return { ...tool, annotations };
   });
@@ -20410,10 +20423,11 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
         };
       }
       case "show_order_list": {
-        const olUri = `ui://cj-mcp/order-list?t=${Date.now()}`;
+        const olData = getOrderListCache();
         return {
           content: [{ type: "text", text: "\u2705 \u8BA2\u5355\u5217\u8868\u754C\u9762\u5DF2\u6253\u5F00 / Order list UI opened." }],
-          _meta: { ui: { resourceUri: olUri } }
+          structuredContent: olData ?? {},
+          _meta: { ui: { resourceUri: ORDER_LIST_UI_URI } }
         };
       }
       case "show_order_detail": {
@@ -20429,10 +20443,11 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
         if (isApiSuccess(odDetailResp) && odDetailResp.data) {
           setOrderDetailCache(odDetailResp.data);
         }
-        const odUri = `ui://cj-mcp/order-detail?t=${Date.now()}`;
+        const odData = getOrderDetailCache();
         return {
           content: [{ type: "text", text: `\u2705 \u8BA2\u5355\u8BE6\u60C5\u754C\u9762\u5DF2\u6253\u5F00 / Order detail UI opened. orderId: ${showOdId}` }],
-          _meta: { ui: { resourceUri: odUri } }
+          structuredContent: odData ?? {},
+          _meta: { ui: { resourceUri: ORDER_DETAIL_UI_URI } }
         };
       }
       case "get_order_detail": {
