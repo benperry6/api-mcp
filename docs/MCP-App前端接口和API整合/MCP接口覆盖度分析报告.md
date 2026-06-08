@@ -153,11 +153,7 @@
 - **API**: POST `/shopping/cogs/queryCogsBasicDataOrderInfo`（shopping.md §4.1）
 - **触发场景**: 「查一下这批订单的采购成本」
 
-#### 17. 以图搜货
-- **API**: POST `/product/queryProductsByImage`（product.md §7.1）
-- **触发场景**: 「我有一张图，帮我找类似的商品」
-
-#### 18. 商品评价查询
+#### 17. 商品评价查询
 - **API**: GET `/product/review/query`（product.md §4.1-4.2）
 - **触发场景**: 「这个商品的评价怎么样」
 

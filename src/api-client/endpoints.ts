@@ -29,7 +29,6 @@ export const ENDPOINTS = {
     sourcingQuery: '/product/sourcing/query',
     connList: '/product/conn/connection',
     productComments: '/product/productComments',
-    imageSearch: '/product/queryProductsByImage',
   },
 
   // === Logistic ===
