@@ -482,22 +482,6 @@ export const productTools: Tool[] = [
     },
   },
   {
-    name: 'search_products_by_image',
-    description: [
-      '以图搜货：通过提供商品图片URL，在CJ商品目录中搜索视觉相似的商品。',
-      '触发场景：「我有张图，帮我找类似商品」「以图搜货」「image search」「find similar products」。',
-      '⚠️ 此API仅限白名单用户使用，非白名单用户调用会返回权限错误。',
-      '参数 imageUrl 必填，建议使用清晰的商品主图URL。',
-    ].join(' '),
-    inputSchema: {
-      type: 'object' as const,
-      properties: {
-        imageUrl: { type: 'string', description: '商品图片URL（必填，建议主图）/ Product image URL (required)' },
-      },
-      required: ['imageUrl'],
-    },
-  },
-  {
     name: 'show_product_list',
     description:
       '【UI展示工具】在 MCP Apps 界面中以可视化卡片形式展示商品列表。\n' +
@@ -568,7 +552,6 @@ const READ_ONLY_PRODUCT_TOOLS = new Set([
   'search_products', 'get_category_tree', 'get_warehouses', 'get_product_detail',
   'query_cj_inventory', 'get_my_products', 'get_product_variants',
   'query_sourcing', 'list_product_connections', 'get_product_reviews',
-  'search_products_by_image',
 ]);
 
 export function getProductTools(): Tool[] {
@@ -689,8 +672,6 @@ export async function handleProductTool(
         return await handleCreateProductConnection(args);
       case 'disconnect_product':
         return await handleDisconnectProduct(args);
-      case 'search_products_by_image':
-        return await handleSearchProductsByImage(args);
       default:
         return { content: [{ type: 'text', text: `Unknown product tool: ${name}` }], isError: true };
     }
@@ -1143,23 +1124,3 @@ async function handleDisconnectProduct(args: Record<string, unknown>) {
   return { content: [{ type: 'text', text: `✅ 商品连接已断开 / Product disconnected.\n${JSON.stringify(response.data, null, 2)}` }] };
 }
 
-async function handleSearchProductsByImage(args: Record<string, unknown>) {
-  /**
-   * @note 新增(第15次): search_products_by_image，POST /product/queryProductsByImage。
-   * ⚠️ 此API仅限白名单用户，非白名单账户会返回权限错误。
-   */
-  if (!args.imageUrl) {
-    return {
-      content: [{ type: 'text', text: '❌ 请提供 imageUrl / Please provide imageUrl.' }],
-      isError: true,
-    };
-  }
-  const response = await httpClient.request(ENDPOINTS.product.imageSearch, {
-    body: { imageUrl: String(args.imageUrl) },
-    tier: 'read',
-  });
-  if (!isApiSuccess(response)) {
-    return { content: [{ type: 'text', text: `以图搜货失败 / Image search failed: ${response.message}\n⚠️ 如果是权限错误，此API需要申请白名单才可使用 / If permission error, this API requires whitelist access.` }], isError: true };
-  }
-  return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
-}
