@@ -17129,8 +17129,7 @@ var ENDPOINTS = {
     sourcingCreate: "/product/sourcing/create",
     sourcingQuery: "/product/sourcing/query",
     connList: "/product/conn/connection",
-    productComments: "/product/productComments",
-    imageSearch: "/product/queryProductsByImage"
+    productComments: "/product/productComments"
   },
   // === Logistic ===
   logistic: {
@@ -18762,22 +18761,6 @@ var productTools = [
     }
   },
   {
-    name: "search_products_by_image",
-    description: [
-      "\u4EE5\u56FE\u641C\u8D27\uFF1A\u901A\u8FC7\u63D0\u4F9B\u5546\u54C1\u56FE\u7247URL\uFF0C\u5728CJ\u5546\u54C1\u76EE\u5F55\u4E2D\u641C\u7D22\u89C6\u89C9\u76F8\u4F3C\u7684\u5546\u54C1\u3002",
-      "\u89E6\u53D1\u573A\u666F\uFF1A\u300C\u6211\u6709\u5F20\u56FE\uFF0C\u5E2E\u6211\u627E\u7C7B\u4F3C\u5546\u54C1\u300D\u300C\u4EE5\u56FE\u641C\u8D27\u300D\u300Cimage search\u300D\u300Cfind similar products\u300D\u3002",
-      "\u26A0\uFE0F \u6B64API\u4EC5\u9650\u767D\u540D\u5355\u7528\u6237\u4F7F\u7528\uFF0C\u975E\u767D\u540D\u5355\u7528\u6237\u8C03\u7528\u4F1A\u8FD4\u56DE\u6743\u9650\u9519\u8BEF\u3002",
-      "\u53C2\u6570 imageUrl \u5FC5\u586B\uFF0C\u5EFA\u8BAE\u4F7F\u7528\u6E05\u6670\u7684\u5546\u54C1\u4E3B\u56FEURL\u3002"
-    ].join(" "),
-    inputSchema: {
-      type: "object",
-      properties: {
-        imageUrl: { type: "string", description: "\u5546\u54C1\u56FE\u7247URL\uFF08\u5FC5\u586B\uFF0C\u5EFA\u8BAE\u4E3B\u56FE\uFF09/ Product image URL (required)" }
-      },
-      required: ["imageUrl"]
-    }
-  },
-  {
     name: "show_product_list",
     description: "\u3010UI\u5C55\u793A\u5DE5\u5177\u3011\u5728 MCP Apps \u754C\u9762\u4E2D\u4EE5\u53EF\u89C6\u5316\u5361\u7247\u5F62\u5F0F\u5C55\u793A\u5546\u54C1\u5217\u8868\u3002\n\u8C03\u7528\u65F6\u673A\uFF1A\u5F53\u7528\u6237\u8BF7\u6C42\u300C\u5C55\u793A\u5546\u54C1\u5217\u8868\u300D\u300C\u4EE5\u5361\u7247\u5F62\u5F0F\u663E\u793A\u5546\u54C1\u300D\u300C\u6253\u5F00\u5546\u54C1\u5217\u8868\u754C\u9762\u300D\u65F6\u8C03\u7528\u6B64\u5DE5\u5177\u3002\n\u4E5F\u53EF\u5728 search_products \u8FD4\u56DE\u7ED3\u679C\u540E\u4E3B\u52A8\u8C03\u7528\u6B64\u5DE5\u5177\uFF0C\u4EE5\u63D0\u4F9B\u66F4\u76F4\u89C2\u7684\u89C6\u89C9\u5C55\u793A\u3002\n\u754C\u9762\u652F\u6301\uFF1A\u641C\u7D22\u3001\u5206\u9875\u3001\u70B9\u51FB\u5546\u54C1\u8DF3\u8F6C\u8BE6\u60C5\u3002\n[UI tool] Show product list in visual card interface. Use after search_products to provide better visual experience.",
     inputSchema: {
@@ -18830,8 +18813,7 @@ var READ_ONLY_PRODUCT_TOOLS = /* @__PURE__ */ new Set([
   "get_product_variants",
   "query_sourcing",
   "list_product_connections",
-  "get_product_reviews",
-  "search_products_by_image"
+  "get_product_reviews"
 ]);
 function getProductTools() {
   const seq = ++productUriSeq;
@@ -18922,8 +18904,6 @@ async function handleProductTool(name, args) {
         return await handleCreateProductConnection(args);
       case "disconnect_product":
         return await handleDisconnectProduct(args);
-      case "search_products_by_image":
-        return await handleSearchProductsByImage(args);
       default:
         return { content: [{ type: "text", text: `Unknown product tool: ${name}` }], isError: true };
     }
@@ -19263,23 +19243,6 @@ async function handleDisconnectProduct(args) {
   }
   return { content: [{ type: "text", text: `\u2705 \u5546\u54C1\u8FDE\u63A5\u5DF2\u65AD\u5F00 / Product disconnected.
 ${JSON.stringify(response.data, null, 2)}` }] };
-}
-async function handleSearchProductsByImage(args) {
-  if (!args.imageUrl) {
-    return {
-      content: [{ type: "text", text: "\u274C \u8BF7\u63D0\u4F9B imageUrl / Please provide imageUrl." }],
-      isError: true
-    };
-  }
-  const response = await httpClient.request(ENDPOINTS.product.imageSearch, {
-    body: { imageUrl: String(args.imageUrl) },
-    tier: "read"
-  });
-  if (!isApiSuccess(response)) {
-    return { content: [{ type: "text", text: `\u4EE5\u56FE\u641C\u8D27\u5931\u8D25 / Image search failed: ${response.message}
-\u26A0\uFE0F \u5982\u679C\u662F\u6743\u9650\u9519\u8BEF\uFF0C\u6B64API\u9700\u8981\u7533\u8BF7\u767D\u540D\u5355\u624D\u53EF\u4F7F\u7528 / If permission error, this API requires whitelist access.` }], isError: true };
-  }
-  return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
 }
 
 // src/mcp-server/tools/logistics.tool.ts
