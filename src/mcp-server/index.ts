@@ -28,6 +28,7 @@ import { logger } from '../utils/logger.js';
 import { registerResources, handleResourceRead, getResourcesList } from './resources/index.js';
 import { apiKeyStorage, directTokenStorage } from '../auth/api-key-context.js';
 import { getSession, refreshSession, createSession } from '../auth/session.js';
+import { parseDirectTokenUrl } from './url-parser.js';
 
 // 工具/资源注册（模块级，只执行一次）
 registerTools();
@@ -139,23 +140,22 @@ async function main() {
        *   GET 请求（SSE 事件流）直接传 undefined 给 transport.handleRequest。
        *   POST 请求才读取并解析 body。
        *
-       * @note 直接 Token URL 格式说明: /mcp/API@{userId}@CJ:{accessToken}
+       * @note 直接 Token URL 格式说明: /mcp/API@{userId}@CJ:{accessToken} 或 /mcp/MCP@{userId}@CJ:{accessToken}
        *   accessToken 若含 URL 特殊字符（+、/、= 等）须做 URL 编码后填入 ChatGPT 应用 URL。
        *   Token 过期后需用户更新 ChatGPT 应用的 URL（服务端无存储，无法自动续期）。
+       * @note 纠正(MCP@ 支持): 原正则只支持 API@ 前缀，MCP@ 格式被误判为 apiKey 导致认证失败。
+       *   现通过 parseDirectTokenUrl (url-parser.ts) 同时支持 API@/MCP@ 两种前缀。
        */
       const urlPath = (req.url ?? '/').split('?')[0];
 
-      // 优先检测直接 Token 格式：/mcp/API@{userId}@CJ:{accessToken}
-      const directTokenMatch = urlPath.match(/^\/mcp\/(API@([^@]+)@CJ:(.+))$/);
+      // 优先检测直接 Token 格式：/mcp/API@{userId}@CJ:{accessToken} 或 /mcp/MCP@{userId}@CJ:{accessToken}
+      const urlDirectToken = parseDirectTokenUrl(urlPath);
       // 其次检测 apiKey 格式：/mcp/{anything}（排除直接 Token 格式）
-      const mcpApiKeyMatch = !directTokenMatch && urlPath.match(/^\/mcp\/(.+)$/);
+      const mcpApiKeyMatch = !urlDirectToken && urlPath.match(/^\/mcp\/(.+)$/);
 
       const urlApiKey = mcpApiKeyMatch ? decodeURIComponent(mcpApiKeyMatch[1]) : undefined;
-      const urlDirectToken = directTokenMatch
-        ? { userId: directTokenMatch[2], accessToken: decodeURIComponent(directTokenMatch[3]) }
-        : undefined;
 
-      const isMcpPath = urlPath === '/mcp' || !!mcpApiKeyMatch || !!directTokenMatch;
+      const isMcpPath = urlPath === '/mcp' || !!mcpApiKeyMatch || !!urlDirectToken;
 
       if (isMcpPath) {
         // apiKey 模式：先确保 session 有效（自动认证/续期），直接 Token 模式无需此步骤
