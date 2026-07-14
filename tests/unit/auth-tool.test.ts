@@ -62,6 +62,15 @@ describe('auth.tool', () => {
     expect(result.content[0].text).toContain('Login form displayed');
   });
 
+  it('verify_credentials 仅传 apiKey 时被拒绝并提示已下线（E2）', async () => {
+    const result = await handleAuthTool('verify_credentials', { apiKey: 'some_api_key' });
+    expect(result.isError).toBe(true);
+    // 仍指出正确做法（loginName/password）
+    expect(result.content[0].text).toMatch(/loginName|password|邮箱|密码/);
+    // 并明确告知 apiKey 登录已下线（与 URL reject 文案一致，避免"以为漏填参数"）
+    expect(result.content[0].text).toMatch(/下线|removed/i);
+  });
+
   it('check_login_status 未登录时提示登录', async () => {
     const result = await handleAuthTool('check_login_status', {});
     expect(result.content[0].text).toContain('未登录');

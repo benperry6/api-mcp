@@ -35,3 +35,30 @@ export function parseDirectTokenUrl(urlPath: string): DirectTokenUrl | undefined
     accessToken: decodeURIComponent(match[4]),
   };
 }
+
+/** MCP 路由决策：plain=本地/密码登录会话；directToken=直连 Token；reject=已下线的 apiKey URL */
+export type McpRouteDecision =
+  | { kind: 'plain' }
+  | { kind: 'directToken'; token: DirectTokenUrl }
+  | { kind: 'reject'; reason: string };
+
+/**
+ * 判定 /mcp 路径的处理方式。
+ * @note 下线 apiKey 登录: 原 /mcp/{apiKey} 自动认证已移除；除 /mcp 与直连 Token 外的
+ *   /mcp/xxx 一律 reject（返回明确错误），不再当作 apiKey 去 getAccessToken。
+ * @returns undefined 表示非 /mcp 路径（由调用方按 404 处理）
+ */
+export function classifyMcpPath(urlPath: string): McpRouteDecision | undefined {
+  if (urlPath === '/mcp') return { kind: 'plain' };
+  const token = parseDirectTokenUrl(urlPath);
+  if (token) return { kind: 'directToken', token };
+  if (/^\/mcp\/.+$/.test(urlPath)) {
+    return {
+      kind: 'reject',
+      reason:
+        'apiKey URL 登录已下线，请改用直连 Token URL: /mcp/API@<userId>@CJ:<accessToken>，' +
+        '或使用 verify_credentials 以邮箱+密码登录。',
+    };
+  }
+  return undefined;
+}
