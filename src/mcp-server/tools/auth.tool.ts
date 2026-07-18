@@ -28,6 +28,7 @@ import {
 } from '../../auth/session.js';
 import { getDirectTokenContext } from '../../auth/api-key-context.js';
 import { rateLimiter } from '../../api-client/rate-limiter.js';
+import { buildClientRequestHeaders } from '../../utils/client-request-context.js';
 
 /**
  * @description MD5 哈希
@@ -389,6 +390,9 @@ async function fetchCsrfToken(loginApiBase: string): Promise<{ csrfToken: string
       method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders(),
       },
       redirect: 'follow',
     });
@@ -497,6 +501,9 @@ async function handleVerifyCredentials(
         'platform': '2',
         'cj-area': '000000',
         'token': '',
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders(),
       },
       body: JSON.stringify({
         loginName: effectiveLoginName,
