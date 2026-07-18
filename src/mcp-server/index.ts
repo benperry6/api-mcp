@@ -28,6 +28,7 @@ import { logger } from '../utils/logger.js';
 import { registerResources, handleResourceRead, getResourcesList } from './resources/index.js';
 import { directTokenStorage } from '../auth/api-key-context.js';
 import { classifyMcpPath } from './url-parser.js';
+import { clientRequestStorage, extractClientRequestContext } from '../utils/client-request-context.js';
 
 // 工具/资源注册（模块级，只执行一次）
 registerTools();
@@ -123,6 +124,21 @@ async function main() {
       if (route) {
         const urlDirectToken = route.kind === 'directToken' ? route.token : undefined;
 
+        /**
+         * @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息，修复原始 IP 丢失。
+         *   从入站 req.headers 提取客户端原始请求上下文（IP/host/url/UA/xff），用
+         *   clientRequestStorage 包裹后续处理；出站后端请求（http-client / 各 raw fetch）
+         *   即可从上下文读取并透传 client-request-* 与 x-forwarded-for header。
+         *   与既有 directTokenStorage 嵌套共存（AsyncLocalStorage 互不干扰）。
+         */
+        const clientReqCtx = extractClientRequestContext(req.headers);
+        const runWithContext = (fn: () => Promise<void> | void): Promise<void> | void => {
+          const runInner = urlDirectToken
+            ? () => directTokenStorage.run(urlDirectToken, fn)
+            : fn;
+          return clientRequestStorage.run(clientReqCtx, runInner);
+        };
+
         const mcpServer = createMCPServer();
         /**
          * stateless 模式：sessionIdGenerator=undefined，不下发 mcp-session-id，每个请求独立
@@ -151,11 +167,7 @@ async function main() {
           logger.raw(`[MCP-REQ] ${new Date().toISOString()} | GET(SSE) | auth=${authTag}`);
 
           const handleGet = () => transport.handleRequest(req, res, undefined);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handleGet);
-          } else {
-            await handleGet();
-          }
+          await runWithContext(handleGet);
         } else {
           // 读取请求 body
           const chunks: Buffer[] = [];
@@ -195,11 +207,7 @@ async function main() {
           }
 
           const handlePost = () => transport.handleRequest(req, res, body);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handlePost);
-          } else {
-            await handlePost();
-          }
+          await runWithContext(handlePost);
         }
 
         res.on('finish', async () => {

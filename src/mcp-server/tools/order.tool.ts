@@ -10,6 +10,7 @@ import { ensureAccessToken } from '../../auth/session.js';
 import { getEnvConfig } from '../../config/env.js';
 import { logger, isDebugMode } from '../../utils/logger.js';
 import { setOrderListCache, setOrderDetailCache, getOrderListCache, getOrderDetailCache } from '../resources/index.js';
+import { buildClientRequestHeaders } from '../../utils/client-request-context.js';
 
 export const orderTools: Tool[] = [
   {
@@ -862,6 +863,8 @@ export async function handleOrderTool(
           headers: {
             'CJ-Access-Token': token,
             'Content-Type': 'application/json',
+            // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff）到后端
+            ...buildClientRequestHeaders(),
           },
         });
         const listData = await listResponse.json();
