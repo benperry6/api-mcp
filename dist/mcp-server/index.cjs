@@ -17366,6 +17366,52 @@ var logger = {
 };
 var startTime = Date.now();
 
+// src/utils/client-request-context.ts
+var import_node_async_hooks = require("node:async_hooks");
+var CLIENT_REQUEST_IP = "client-request-ip";
+var CLIENT_REQUEST_URL = "client-request-url";
+var CLIENT_REQUEST_HOST = "client-request-host";
+var CLIENT_REQUEST_USER_AGENT = "client-request-user-agent";
+var X_FORWARDED_FOR = "x-forwarded-for";
+var clientRequestStorage = new import_node_async_hooks.AsyncLocalStorage();
+function getClientRequestContext() {
+  return clientRequestStorage.getStore();
+}
+function firstHeader(value) {
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+function sanitizeUrlCredentials(url) {
+  if (!url) return url;
+  return url.replace(/(@CJ:)[^/?#\s]+/gi, "$1***");
+}
+function extractClientRequestContext(headers) {
+  const xRealIp = firstHeader(headers["x-real-ip"]);
+  const xff = firstHeader(headers["x-forwarded-for"]);
+  const firstXffAddr = xff ? xff.split(",")[0].trim() : void 0;
+  const clientRequestIp = xRealIp || firstXffAddr;
+  const xForwardedFor = xff || xRealIp;
+  return {
+    clientRequestIp,
+    // @note 纠正(安全 CWE-532): x-original-url 在直连 Token 模式含活凭证，脱敏后再透传
+    clientRequestUrl: sanitizeUrlCredentials(firstHeader(headers["x-original-url"])),
+    clientRequestHost: firstHeader(headers["host"]),
+    clientRequestUserAgent: firstHeader(headers["user-agent"]),
+    xForwardedFor
+  };
+}
+function buildClientRequestHeaders() {
+  const ctx = getClientRequestContext();
+  if (!ctx) return {};
+  const headers = {};
+  if (ctx.clientRequestIp) headers[CLIENT_REQUEST_IP] = ctx.clientRequestIp;
+  if (ctx.clientRequestUrl) headers[CLIENT_REQUEST_URL] = ctx.clientRequestUrl;
+  if (ctx.clientRequestHost) headers[CLIENT_REQUEST_HOST] = ctx.clientRequestHost;
+  if (ctx.clientRequestUserAgent) headers[CLIENT_REQUEST_USER_AGENT] = ctx.clientRequestUserAgent;
+  if (ctx.xForwardedFor) headers[X_FORWARDED_FOR] = ctx.xForwardedFor;
+  return headers;
+}
+
 // src/api-client/http-client.ts
 function isApiSuccess(response) {
   return response.result === true || response.success === true || response.code === 200 || response.code === 0;
@@ -17406,6 +17452,7 @@ var HttpClient = class {
             headers["CJ-Access-Token"] = token;
           }
         }
+        Object.assign(headers, buildClientRequestHeaders());
         const fetchOptions = {
           method,
           headers
@@ -17453,35 +17500,13 @@ var AuthExpiredError = class extends Error {
 var httpClient = new HttpClient();
 
 // src/auth/api-key-context.ts
-var import_node_async_hooks = require("node:async_hooks");
-var apiKeyStorage = new import_node_async_hooks.AsyncLocalStorage();
-function getContextApiKey() {
-  return apiKeyStorage.getStore();
-}
-var directTokenStorage = new import_node_async_hooks.AsyncLocalStorage();
+var import_node_async_hooks2 = require("node:async_hooks");
+var directTokenStorage = new import_node_async_hooks2.AsyncLocalStorage();
 function getDirectTokenContext() {
   return directTokenStorage.getStore();
 }
 
 // src/auth/session.ts
-var apiKeySessions = /* @__PURE__ */ new Map();
-function cleanupExpiredApiKeySessions() {
-  const now = /* @__PURE__ */ new Date();
-  let count = 0;
-  for (const [key, session] of apiKeySessions) {
-    if (new Date(session.refreshTokenExpiry) < now) {
-      apiKeySessions.delete(key);
-      count++;
-    }
-  }
-  return count;
-}
-var _cleanupTimer = setInterval(() => {
-  const removed = cleanupExpiredApiKeySessions();
-  if (removed > 0) {
-    console.info(`[session] \u81EA\u52A8\u6E05\u7406\u8FC7\u671F apiKey session: \u79FB\u9664 ${removed} \u6761 / Auto-cleanup: removed ${removed} expired apiKey sessions`);
-  }
-}, 30 * 60 * 1e3).unref();
 var tokenStore = TokenStore.getInstance();
 var currentSession = null;
 function getSession() {
@@ -17496,10 +17521,6 @@ function getSession() {
       refreshTokenExpiry: new Date(Date.now() + 864e5).toISOString(),
       openId: directCtx.userId
     };
-  }
-  const ctxApiKey = getContextApiKey();
-  if (ctxApiKey !== void 0) {
-    return apiKeySessions.get(ctxApiKey) ?? null;
   }
   if (currentSession) return currentSession;
   const stored = tokenStore.getToken();
@@ -17529,13 +17550,8 @@ function isSessionValid() {
 }
 function setSessionDirect(data) {
   const session = { ...data };
-  const ctxApiKey = getContextApiKey();
-  if (ctxApiKey !== void 0) {
-    apiKeySessions.set(ctxApiKey, session);
-  } else {
-    currentSession = session;
-    tokenStore.setToken(JSON.stringify(session));
-  }
+  currentSession = session;
+  tokenStore.setToken(JSON.stringify(session));
   return session;
 }
 async function createSession(email2, apiKey, loginToken) {
@@ -17554,16 +17570,10 @@ async function createSession(email2, apiKey, loginToken) {
     refreshToken: response.data.refreshToken,
     refreshTokenExpiry: response.data.refreshTokenExpiryDate,
     openId: String(response.data.openId),
-    loginToken,
-    apiKey
+    loginToken
   };
-  const ctxApiKey = getContextApiKey();
-  if (ctxApiKey !== void 0) {
-    apiKeySessions.set(ctxApiKey, session);
-  } else {
-    currentSession = session;
-    tokenStore.setToken(JSON.stringify(session));
-  }
+  currentSession = session;
+  tokenStore.setToken(JSON.stringify(session));
   return session;
 }
 async function refreshSession() {
@@ -17587,13 +17597,8 @@ async function refreshSession() {
     session.accessTokenExpiry = response.data.accessTokenExpiryDate;
     session.refreshToken = response.data.refreshToken;
     session.refreshTokenExpiry = response.data.refreshTokenExpiryDate;
-    const ctxApiKey = getContextApiKey();
-    if (ctxApiKey !== void 0) {
-      apiKeySessions.set(ctxApiKey, session);
-    } else {
-      currentSession = session;
-      tokenStore.setToken(JSON.stringify(session));
-    }
+    currentSession = session;
+    tokenStore.setToken(JSON.stringify(session));
     return true;
   } catch {
     clearSession();
@@ -17601,13 +17606,8 @@ async function refreshSession() {
   }
 }
 function clearSession() {
-  const ctxApiKey = getContextApiKey();
-  if (ctxApiKey !== void 0) {
-    apiKeySessions.delete(ctxApiKey);
-  } else {
-    currentSession = null;
-    tokenStore.clearToken();
-  }
+  currentSession = null;
+  tokenStore.clearToken();
 }
 async function ensureAccessToken() {
   const directCtx = getDirectTokenContext();
@@ -17632,11 +17632,11 @@ var authTools = [
     name: "show_login_form",
     description: [
       "\u5C55\u793ACJ Dropshipping\u767B\u5F55\u5F15\u5BFC\u4FE1\u606F\uFF08\u4EC5\u8FD4\u56DE\u6587\u5B57\uFF0C\u4E0D\u5F39\u51FAUI\u7A97\u53E3\uFF09\u3002",
-      '\u26A1 \u82E5\u901A\u8FC7 /mcp/{apiKey} URL \u914D\u7F6E\u63A5\u5165\uFF0C\u4F1A\u76F4\u63A5\u8FD4\u56DE"\u5DF2\u81EA\u52A8\u8BA4\u8BC1"\u72B6\u6001\uFF0C\u65E0\u9700\u767B\u5F55\u3002',
+      '\u26A1 \u82E5\u901A\u8FC7 /mcp/API@userId@CJ:token \u76F4\u8FDE Token URL \u63A5\u5165\uFF0C\u4F1A\u76F4\u63A5\u8FD4\u56DE"\u5DF2\u81EA\u52A8\u8BA4\u8BC1"\u72B6\u6001\uFF0C\u65E0\u9700\u767B\u5F55\u3002',
       "\u5982\u9700\u5F39\u51FA\u767B\u5F55\u754C\u9762\uFF08VS Code Copilot\uFF09\uFF0C\u8BF7\u76F4\u63A5\u4F7F\u7528 wait_for_login\u3002",
       "\u26A0\uFE0F Codex / \u547D\u4EE4\u884C / ChatGPT / \u65E0UI\u73AF\u5883\uFF1A\u8BF7\u6539\u7528 verify_credentials \u76F4\u63A5\u4F20\u5165\u90AE\u7BB1\u548C\u5BC6\u7801\u767B\u5F55\u3002",
       "Show login guidance text only (no UI popup).",
-      "\u26A1 If connected via /mcp/{apiKey} URL, returns auto-authenticated status immediately.",
+      "\u26A1 If connected via /mcp/API@userId@CJ:token direct-token URL, returns auto-authenticated status immediately.",
       "For VS Code Copilot with UI, use wait_for_login.",
       "\u26A0\uFE0F Codex/CLI/ChatGPT: use verify_credentials with email+password instead."
     ].join(" "),
@@ -17648,14 +17648,13 @@ var authTools = [
   },
   {
     name: "verify_credentials",
-    description: "\u9A8C\u8BC1\u7528\u6237\u767B\u5F55\u51ED\u636E\u5E76\u5EFA\u7ACB\u4F1A\u8BDD\u3002\u652F\u6301\u4E24\u79CD\u65B9\u5F0F\uFF1A1) email/loginName+password \u524D\u7AEF\u767B\u5F55 2) apiKey \u76F4\u63A5\u83B7\u53D6OpenAPI token / Verify user credentials. Supports: 1) email/loginName+password frontend login 2) apiKey direct OpenAPI token exchange",
+    description: "\u9A8C\u8BC1\u7528\u6237\u767B\u5F55\u51ED\u636E\u5E76\u5EFA\u7ACB\u4F1A\u8BDD\uFF1Aemail/loginName + password \u524D\u7AEF\u767B\u5F55 / Verify credentials via email/loginName + password frontend login.",
     inputSchema: {
       type: "object",
       properties: {
         loginName: { type: "string", description: "\u767B\u5F55\u90AE\u7BB1\u6216\u7528\u6237\u540D\uFF08\u63A8\u8350\uFF09/ Login email or username (recommended)" },
         email: { type: "string", description: "\u767B\u5F55\u90AE\u7BB1\uFF08\u517C\u5BB9\u65E7\u7248\uFF09/ Login email (legacy, use loginName instead)" },
-        password: { type: "string", description: "\u767B\u5F55\u5BC6\u7801 / Login password" },
-        apiKey: { type: "string", description: "(\u53EF\u9009) CJ OpenAPI Key\uFF0C\u63D0\u4F9B\u540E\u76F4\u63A5\u8D70 getAccessToken\uFF0C\u8DF3\u8FC7\u524D\u7AEF\u767B\u5F55 / (Optional) CJ OpenAPI Key, skips frontend login" }
+        password: { type: "string", description: "\u767B\u5F55\u5BC6\u7801 / Login password" }
       },
       required: []
     }
@@ -17664,9 +17663,9 @@ var authTools = [
     name: "check_login_status",
     description: [
       "\u68C0\u67E5\u5F53\u524D\u767B\u5F55\u72B6\u6001\u548Ctoken\u6709\u6548\u671F\u3002",
-      '\u26A1 \u901A\u8FC7 /mcp/{apiKey} URL \u914D\u7F6E\u63A5\u5165\u65F6\uFF0C\u4F1A\u663E\u793A"\u5DF2\u901A\u8FC7URL apiKey\u81EA\u52A8\u8BA4\u8BC1"\u3002',
+      '\u26A1 \u901A\u8FC7 /mcp/API@userId@CJ:token \u76F4\u8FDE Token URL \u63A5\u5165\u65F6\uFF0C\u4F1A\u663E\u793A"\u5DF2\u901A\u8FC7 URL \u76F4\u63A5 Token \u8BA4\u8BC1"\u3002',
       "Check current login status and token validity.",
-      "\u26A1 When connected via /mcp/{apiKey} URL, shows auto-authenticated status."
+      "\u26A1 When connected via /mcp/API@userId@CJ:token direct-token URL, shows auto-authenticated status."
     ].join(" "),
     inputSchema: {
       type: "object",
@@ -17743,7 +17742,6 @@ async function handleAuthTool(name, args) {
   switch (name) {
     case "show_login_form":
       {
-        const ctxApiKey = getContextApiKey();
         const directCtx = getDirectTokenContext();
         if (directCtx) {
           return {
@@ -17759,24 +17757,6 @@ async function handleAuthTool(name, args) {
                 ``,
                 `\u26A0\uFE0F \u6CE8\u610F\uFF1AToken \u8FC7\u671F\u540E\u9700\u66F4\u65B0 ChatGPT \u5E94\u7528 URL \u4E2D\u7684 token \u5185\u5BB9\u3002`,
                 `Note: When token expires, update the token in your ChatGPT app URL.`
-              ].join("\n")
-            }]
-          };
-        }
-        if (ctxApiKey && getSession()) {
-          const session = getSession();
-          const maskedKey = ctxApiKey.length > 12 ? `${ctxApiKey.slice(0, 12)}\u2026` : ctxApiKey;
-          return {
-            content: [{
-              type: "text",
-              text: [
-                `\u2705 \u5DF2\u901A\u8FC7 URL ApiKey \u81EA\u52A8\u5B8C\u6210\u8BA4\u8BC1\uFF0C\u65E0\u9700\u624B\u52A8\u767B\u5F55 / Auto-authenticated via URL apiKey, no login required.`,
-                ``,
-                `\u{1F511} ApiKey: ${maskedKey}`,
-                `\u{1F464} \u7528\u6237 / User: ${session.email}`,
-                ``,
-                `\u{1F680} \u53EF\u76F4\u63A5\u6267\u884C\u4EFB\u52A1\uFF0C\u4F8B\u5982\uFF1A\u67E5\u8BE2\u8BA2\u5355\u3001\u641C\u7D22\u5546\u54C1\u7B49\u3002`,
-                `You can directly execute tasks such as: query orders, search products, etc.`
               ].join("\n")
             }]
           };
@@ -17896,7 +17876,10 @@ async function fetchCsrfToken(loginApiBase) {
     const resp = await fetch(`${loginApiBase}/login.html`, {
       method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders()
       },
       redirect: "follow"
     });
@@ -17916,31 +17899,13 @@ async function fetchCsrfToken(loginApiBase) {
   }
 }
 async function handleVerifyCredentials(args) {
-  const { loginName, email: email2, password, apiKey } = args;
+  const { loginName, email: email2, password } = args;
   const effectiveLoginName = loginName || email2;
-  if (apiKey) {
-    try {
-      const session = await createSession(effectiveLoginName || "apikey-user", apiKey);
-      return {
-        content: [{
-          type: "text",
-          text: `\u2705 API Key \u8BA4\u8BC1\u6210\u529F / API Key authentication successful!
-OpenID: ${session.openId}
-Token\u6709\u6548\u671F / Token expires: ${session.accessTokenExpiry}
-RefreshToken\u6709\u6548\u671F / RefreshToken expires: ${session.refreshTokenExpiry}`
-        }]
-      };
-    } catch (error2) {
-      const msg = error2 instanceof Error ? error2.message : String(error2);
-      return {
-        content: [{ type: "text", text: `API Key \u8BA4\u8BC1\u5931\u8D25 / API Key authentication failed: ${msg}` }],
-        isError: true
-      };
-    }
-  }
   if (!effectiveLoginName || !password) {
+    const triedApiKey = args.apiKey != null;
+    const text = triedApiKey ? "apiKey \u767B\u5F55\u5DF2\u4E0B\u7EBF\uFF0C\u8BF7\u6539\u7528 email/loginName+password\uFF0C\u6216\u76F4\u8FDE Token URL (/mcp/API@userId@CJ:token) / apiKey login removed; use email/loginName+password, or a direct-token URL." : "\u8BF7\u63D0\u4F9B email/loginName+password / Please provide email/loginName+password";
     return {
-      content: [{ type: "text", text: "\u8BF7\u63D0\u4F9B email/loginName+password \u6216 apiKey / Please provide email/loginName+password or apiKey" }],
+      content: [{ type: "text", text }],
       isError: true
     };
   }
@@ -17964,7 +17929,10 @@ RefreshToken\u6709\u6548\u671F / RefreshToken expires: ${session.refreshTokenExp
         "Cookie": cookies || `csrfToken=${csrfToken}`,
         "platform": "2",
         "cj-area": "000000",
-        "token": ""
+        "token": "",
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders()
       },
       body: JSON.stringify({
         loginName: effectiveLoginName,
@@ -18011,13 +17979,13 @@ RefreshToken\u6709\u6548\u671F / RefreshToken expires: ${session.refreshTokenExp
         isError: true
       };
     }
-    const apiKey2 = loginData.data?.apiKey;
+    const apiKey = loginData.data?.apiKey;
     const loginToken = loginData.data?.accessToken || loginData.data?.cjLoginToken || loginData.data?.token;
     const userEmail = loginData.data?.extra?.email || loginData.data?.email;
     const displayEmail = userEmail || effectiveLoginName;
     const tokenExpiry = loginData.data?.expireTime ? new Date(Number(loginData.data.expireTime)).toISOString() : new Date(Date.now() + 7 * 24 * 60 * 60 * 1e3).toISOString();
     const openId = String(loginData.data?.id || "");
-    if (!apiKey2) {
+    if (!apiKey) {
       if (loginToken) {
         const session2 = setSessionDirect({
           email: displayEmail,
@@ -18057,7 +18025,7 @@ ${apiKeyUrl}
         isError: true
       };
     }
-    const session = await createSession(effectiveLoginName, apiKey2, loginToken || void 0);
+    const session = await createSession(effectiveLoginName, apiKey, loginToken || void 0);
     return {
       content: [{
         type: "text",
@@ -18091,7 +18059,6 @@ function handleCheckLoginStatus() {
     };
   }
   const session = getSession();
-  const ctxApiKey = getContextApiKey();
   if (!session) {
     return {
       content: [{
@@ -18103,7 +18070,7 @@ function handleCheckLoginStatus() {
   const valid = isSessionValid();
   const accessExpiry = new Date(session.accessTokenExpiry);
   const now = /* @__PURE__ */ new Date();
-  const authMethod = ctxApiKey ? `\u{1F511} \u8BA4\u8BC1\u65B9\u5F0F / Auth via: URL apiKey (${ctxApiKey.length > 12 ? ctxApiKey.slice(0, 12) + "\u2026" : ctxApiKey})` : `\u{1F511} \u8BA4\u8BC1\u65B9\u5F0F / Auth via: \u624B\u52A8\u767B\u5F55 / Manual login`;
+  const authMethod = `\u{1F511} \u8BA4\u8BC1\u65B9\u5F0F / Auth via: \u624B\u52A8\u767B\u5F55 / Manual login`;
   return {
     content: [{
       type: "text",
@@ -18166,7 +18133,75 @@ function getProductUrl(baseUrl, id, name = "") {
   return `${baseUrl}${getProductHref(id, name)}`;
 }
 
+// src/utils/keyed-ttl-cache.ts
+var KeyedTtlStore = class {
+  map = /* @__PURE__ */ new Map();
+  ttlMs;
+  maxEntries;
+  constructor(opts) {
+    this.ttlMs = opts.ttlMs;
+    this.maxEntries = opts.maxEntries;
+  }
+  /** 读取；已过期视为未命中（顺手删除，不复活）；命中则滑动 TTL */
+  get(key) {
+    const entry = this.map.get(key);
+    if (!entry) return void 0;
+    if (entry.expiry < Date.now()) {
+      this.map.delete(key);
+      return void 0;
+    }
+    entry.expiry = Date.now() + this.ttlMs;
+    return entry.value;
+  }
+  /** 写入；滑动 TTL；新键超过容量上限时驱逐最久未活动的条目 */
+  set(key, value) {
+    const existing = this.map.get(key);
+    if (existing) {
+      existing.value = value;
+      existing.expiry = Date.now() + this.ttlMs;
+      return;
+    }
+    if (this.map.size >= this.maxEntries) {
+      this.evictOne();
+    }
+    this.map.set(key, { value, expiry: Date.now() + this.ttlMs });
+  }
+  delete(key) {
+    this.map.delete(key);
+  }
+  size() {
+    return this.map.size;
+  }
+  /** 删除所有已过期条目，返回删除数量 */
+  cleanupExpired() {
+    const now = Date.now();
+    let count = 0;
+    for (const [key, entry] of this.map) {
+      if (entry.expiry < now) {
+        this.map.delete(key);
+        count++;
+      }
+    }
+    return count;
+  }
+  /** 为腾出容量：先清过期，仍超限则驱逐 expiry 最小（最久未活动）的一条 */
+  evictOne() {
+    this.cleanupExpired();
+    if (this.map.size < this.maxEntries) return;
+    let oldestKey;
+    let oldestExpiry = Infinity;
+    for (const [key, entry] of this.map) {
+      if (entry.expiry < oldestExpiry) {
+        oldestExpiry = entry.expiry;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey !== void 0) this.map.delete(oldestKey);
+  }
+};
+
 // src/mcp-server/resources/index.ts
+var import_node_crypto = require("node:crypto");
 var MCP_APP_HTML_MIME = "text/html;profile=mcp-app";
 var CJ_MCP_UI_CSP = {
   resourceDomains: [
@@ -18197,33 +18232,73 @@ function buildMcpAppHtmlContent(uri, htmlContent) {
     _meta: CJ_MCP_UI_META
   };
 }
-var cachedProductListData = null;
-var cachedProductDetailData = null;
-var cachedOrderListData = null;
-var cachedOrderDetailData = null;
+function toInlineScriptJson(data) {
+  return (JSON.stringify(data) ?? "null").replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+}
+var UI_CACHE_TTL_MS = 30 * 60 * 1e3;
+function resolveMaxUsers(raw, fallback = 500) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : fallback;
+}
+var UI_CACHE_MAX_USERS = resolveMaxUsers(process.env.CJ_UI_CACHE_MAX_USERS);
+var uiCache = new KeyedTtlStore({
+  ttlMs: UI_CACHE_TTL_MS,
+  maxEntries: UI_CACHE_MAX_USERS
+});
+function credentialHash(secret) {
+  return (0, import_node_crypto.createHash)("sha256").update(secret).digest("hex").slice(0, 16);
+}
+function getUiCacheKey() {
+  const direct = getDirectTokenContext();
+  if (direct) return `dt:${credentialHash(direct.accessToken)}`;
+  return "__local__";
+}
+function readUiData() {
+  return uiCache.get(getUiCacheKey());
+}
+function writeUiData(mutate) {
+  const key = getUiCacheKey();
+  const bucket = uiCache.get(key) ?? {};
+  mutate(bucket);
+  uiCache.set(key, bucket);
+}
+function cleanupExpiredUiCache() {
+  return uiCache.cleanupExpired();
+}
+setInterval(() => {
+  cleanupExpiredUiCache();
+}, UI_CACHE_TTL_MS).unref();
 function setProductListCache(data) {
-  cachedProductListData = data;
+  writeUiData((b) => {
+    b.productList = data;
+  });
 }
 function getProductListCache() {
-  return cachedProductListData;
+  return readUiData()?.productList ?? null;
 }
 function setProductDetailCache(data) {
-  cachedProductDetailData = data;
+  writeUiData((b) => {
+    b.productDetail = data;
+  });
 }
 function getProductDetailCache() {
-  return cachedProductDetailData;
+  return readUiData()?.productDetail ?? null;
 }
 function setOrderListCache(data) {
-  cachedOrderListData = data;
+  writeUiData((b) => {
+    b.orderList = data;
+  });
 }
 function getOrderListCache() {
-  return cachedOrderListData;
+  return readUiData()?.orderList ?? null;
 }
 function setOrderDetailCache(data) {
-  cachedOrderDetailData = data;
+  writeUiData((b) => {
+    b.orderDetail = data;
+  });
 }
 function getOrderDetailCache() {
-  return cachedOrderDetailData;
+  return readUiData()?.orderDetail ?? null;
 }
 var resources = [
   {
@@ -18273,114 +18348,50 @@ async function handleResourceRead(uri) {
     return { contents: [buildMcpAppHtmlContent(uri, htmlContent)] };
   }
   if (uri.startsWith("ui://cj-mcp/product-list")) {
-    if (!cachedProductListData) {
-      await fetchProductListFallback();
-    }
-    logger.debug(`[RESOURCE] product-list requested, cache=${cachedProductListData != null ? "HIT" : "MISS"}`);
+    const listData = getProductListCache();
+    logger.debug(`[RESOURCE] product-list requested, cache=${listData != null ? "HIT" : "MISS"}`);
     let htmlContent = readUiHtmlFile("product-list.html");
-    if (cachedProductListData) {
-      const initScript = `<script>window.__INITIAL_DATA__ = ${JSON.stringify(cachedProductListData)};</script>`;
-      htmlContent = htmlContent.replace("</head>", `${initScript}
+    if (listData) {
+      const initScript = `<script>window.__INITIAL_DATA__ = ${toInlineScriptJson(listData)};</script>`;
+      htmlContent = htmlContent.replace("</head>", () => `${initScript}
 </head>`);
     }
     return { contents: [buildMcpAppHtmlContent(uri, htmlContent)] };
   }
   if (uri.startsWith("ui://cj-mcp/product-detail")) {
-    logger.debug(`[RESOURCE] product-detail requested, cache=${cachedProductDetailData != null ? "HIT" : "MISS"}`);
+    const detailData = getProductDetailCache();
+    logger.debug(`[RESOURCE] product-detail requested, cache=${detailData != null ? "HIT" : "MISS"}`);
     let htmlContent = readUiHtmlFile("product-detail.html");
-    if (cachedProductDetailData) {
-      const initScript = `<script>window.__INITIAL_DATA__ = ${JSON.stringify(cachedProductDetailData)};</script>`;
-      htmlContent = htmlContent.replace("</head>", `${initScript}
+    if (detailData) {
+      const initScript = `<script>window.__INITIAL_DATA__ = ${toInlineScriptJson(detailData)};</script>`;
+      htmlContent = htmlContent.replace("</head>", () => `${initScript}
 </head>`);
     }
     return { contents: [buildMcpAppHtmlContent(uri, htmlContent)] };
   }
   if (uri.startsWith("ui://cj-mcp/order-detail")) {
-    logger.debug(`[RESOURCE] order-detail requested, cache=${cachedOrderDetailData != null ? "HIT" : "MISS"}`);
+    const detailData = getOrderDetailCache();
+    logger.debug(`[RESOURCE] order-detail requested, cache=${detailData != null ? "HIT" : "MISS"}`);
     let htmlContent = readUiHtmlFile("order-detail.html");
-    if (cachedOrderDetailData) {
-      const initScript = `<script>window.__INITIAL_DATA__ = ${JSON.stringify(cachedOrderDetailData)};</script>`;
-      htmlContent = htmlContent.replace("</head>", `${initScript}
+    if (detailData) {
+      const initScript = `<script>window.__INITIAL_DATA__ = ${toInlineScriptJson(detailData)};</script>`;
+      htmlContent = htmlContent.replace("</head>", () => `${initScript}
 </head>`);
     }
     return { contents: [buildMcpAppHtmlContent(uri, htmlContent)] };
   }
   if (uri.startsWith("ui://cj-mcp/order-list")) {
-    if (!cachedOrderListData) {
-      await fetchOrderListFallback();
-    }
-    logger.debug(`[RESOURCE] order-list requested, cache=${cachedOrderListData != null ? "HIT" : "MISS"}`);
+    const listData = getOrderListCache();
+    logger.debug(`[RESOURCE] order-list requested, cache=${listData != null ? "HIT" : "MISS"}`);
     let htmlContent = readUiHtmlFile("order-list.html");
-    if (cachedOrderListData) {
-      const initScript = `<script>window.__INITIAL_DATA__ = ${JSON.stringify(cachedOrderListData)};</script>`;
-      htmlContent = htmlContent.replace("</head>", `${initScript}
+    if (listData) {
+      const initScript = `<script>window.__INITIAL_DATA__ = ${toInlineScriptJson(listData)};</script>`;
+      htmlContent = htmlContent.replace("</head>", () => `${initScript}
 </head>`);
     }
     return { contents: [buildMcpAppHtmlContent(uri, htmlContent)] };
   }
   throw new Error(`Unknown resource: ${uri}`);
-}
-async function fetchProductListFallback() {
-  const token = getAccessToken();
-  if (!token) {
-    logger.debug("[RESOURCE] product-list fallback: no auth token, skip auto-fetch");
-    return;
-  }
-  try {
-    logger.debug("[RESOURCE] product-list fallback: fetching from API...");
-    const response = await httpClient.request(ENDPOINTS.product.listV2, {
-      method: "GET",
-      params: { page: "1", size: "20", isWarehouse: "true", startWarehouseInventory: "1" },
-      tier: "read"
-    });
-    if (isApiSuccess(response) && response.data) {
-      const config2 = getEnvConfig();
-      const data = response.data;
-      if (data && Array.isArray(data.content)) {
-        data.content = data.content.map((contentItem) => {
-          if (!Array.isArray(contentItem.productList)) return contentItem;
-          return {
-            ...contentItem,
-            productList: contentItem.productList.map((item) => ({
-              ...item,
-              productUrl: getProductUrl(config2.webBase, String(item.id || ""), String(item.nameEn || ""))
-            }))
-          };
-        });
-      }
-      cachedProductListData = response.data;
-      logger.debug("[RESOURCE] product-list fallback: cache populated");
-    }
-  } catch (err) {
-    logger.debug(`[RESOURCE] product-list fallback failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-}
-async function fetchOrderListFallback() {
-  const token = getAccessToken();
-  if (!token) {
-    logger.debug("[RESOURCE] order-list fallback: no auth token, skip auto-fetch");
-    return;
-  }
-  try {
-    logger.debug("[RESOURCE] order-list fallback: fetching from API...");
-    const env = getEnvConfig();
-    const urlParams = new URLSearchParams({ pageNum: "1", pageSize: "10" });
-    const listUrl = `${env.openApiBase}${API_VERSION_PREFIX}${ENDPOINTS.shopping.listOrder}?${urlParams.toString()}`;
-    const listResponse = await fetch(listUrl, {
-      method: "GET",
-      headers: {
-        "CJ-Access-Token": token,
-        "Content-Type": "application/json"
-      }
-    });
-    const listData = await listResponse.json();
-    if (listData.code === 200 && listData.data) {
-      cachedOrderListData = listData.data;
-      logger.debug("[RESOURCE] order-list fallback: cache populated");
-    }
-  } catch (err) {
-    logger.debug(`[RESOURCE] order-list fallback failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
 }
 
 // src/mcp-server/tools/product.tool.ts
@@ -19471,7 +19482,8 @@ async function handleGetTrackingInfo(args) {
   const token = await ensureAccessToken();
   const res = await fetch(url, {
     method: "GET",
-    headers: { "CJ-Access-Token": token ?? "", "Content-Type": "application/json" }
+    // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff）到后端
+    headers: { "CJ-Access-Token": token ?? "", "Content-Type": "application/json", ...buildClientRequestHeaders() }
   });
   const data = await res.json();
   if (!isApiSuccess(data)) {
@@ -20359,7 +20371,9 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
           method: "GET",
           headers: {
             "CJ-Access-Token": token,
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff）到后端
+            ...buildClientRequestHeaders()
           }
         });
         const listData = await listResponse.json();
@@ -21695,24 +21709,31 @@ Please try again later, or use check_login_status to verify your session.` }],
   }
 }
 
+// src/mcp-server/url-parser.ts
+function parseDirectTokenUrl(urlPath) {
+  const match = urlPath.match(/^\/mcp\/((API|MCP)@([^@]+)@CJ:(.+))$/);
+  if (!match) return void 0;
+  return {
+    userId: decodeURIComponent(match[3]),
+    accessToken: decodeURIComponent(match[4])
+  };
+}
+function classifyMcpPath(urlPath) {
+  if (urlPath === "/mcp") return { kind: "plain" };
+  const token = parseDirectTokenUrl(urlPath);
+  if (token) return { kind: "directToken", token };
+  if (/^\/mcp\/.+$/.test(urlPath)) {
+    return {
+      kind: "reject",
+      reason: "apiKey URL \u767B\u5F55\u5DF2\u4E0B\u7EBF\uFF0C\u8BF7\u6539\u7528\u76F4\u8FDE Token URL: /mcp/API@<userId>@CJ:<accessToken>\uFF0C\u6216\u4F7F\u7528 verify_credentials \u4EE5\u90AE\u7BB1+\u5BC6\u7801\u767B\u5F55\u3002"
+    };
+  }
+  return void 0;
+}
+
 // src/mcp-server/index.ts
 registerTools();
 registerResources();
-async function ensureApiKeySession(apiKey) {
-  await apiKeyStorage.run(apiKey, async () => {
-    const session = getSession();
-    if (session && new Date(session.accessTokenExpiry) > /* @__PURE__ */ new Date()) return;
-    if (session?.refreshToken && new Date(session.refreshTokenExpiry) > /* @__PURE__ */ new Date()) {
-      const refreshed = await refreshSession();
-      if (refreshed) return;
-    }
-    try {
-      await createSession("apikey-url-user", apiKey);
-    } catch (e) {
-      logger.warn("AUTH", `[ensureApiKeySession] apiKey URL \u81EA\u52A8\u8BA4\u8BC1\u5931\u8D25: ${e}`);
-    }
-  });
-}
 function createMCPServer() {
   const mcpServer = new Server(
     { name: "cj-dropshipping-mcp", version: "0.2.0" },
@@ -21753,31 +21774,29 @@ async function main() {
         return;
       }
       const urlPath = (req.url ?? "/").split("?")[0];
-      const directTokenMatch = urlPath.match(/^\/mcp\/(API@([^@]+)@CJ:(.+))$/);
-      const mcpApiKeyMatch = !directTokenMatch && urlPath.match(/^\/mcp\/(.+)$/);
-      const urlApiKey = mcpApiKeyMatch ? decodeURIComponent(mcpApiKeyMatch[1]) : void 0;
-      const urlDirectToken = directTokenMatch ? { userId: directTokenMatch[2], accessToken: decodeURIComponent(directTokenMatch[3]) } : void 0;
-      const isMcpPath = urlPath === "/mcp" || !!mcpApiKeyMatch || !!directTokenMatch;
-      if (isMcpPath) {
-        if (urlApiKey) {
-          await ensureApiKeySession(urlApiKey);
-        }
+      const route = classifyMcpPath(urlPath);
+      if (route?.kind === "reject") {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: route.reason }));
+        return;
+      }
+      if (route) {
+        const urlDirectToken = route.kind === "directToken" ? route.token : void 0;
+        const clientReqCtx = extractClientRequestContext(req.headers);
+        const runWithContext = (fn) => {
+          const runInner = urlDirectToken ? () => directTokenStorage.run(urlDirectToken, fn) : fn;
+          return clientRequestStorage.run(clientReqCtx, runInner);
+        };
         const mcpServer = createMCPServer();
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: void 0
         });
         await mcpServer.connect(transport);
         if (req.method === "GET") {
-          const authTag = urlDirectToken ? `directToken(${urlDirectToken.userId})` : urlApiKey ? `apiKey(${urlApiKey.slice(0, 12)}\u2026)` : "none";
+          const authTag = urlDirectToken ? `directToken(${urlDirectToken.userId})` : "none";
           logger.raw(`[MCP-REQ] ${(/* @__PURE__ */ new Date()).toISOString()} | GET(SSE) | auth=${authTag}`);
           const handleGet = () => transport.handleRequest(req, res, void 0);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handleGet);
-          } else if (urlApiKey) {
-            await apiKeyStorage.run(urlApiKey, handleGet);
-          } else {
-            await handleGet();
-          }
+          await runWithContext(handleGet);
         } else {
           const chunks = [];
           for await (const chunk of req) {
@@ -21806,18 +21825,12 @@ async function main() {
                 argsSummary = ` | args=[${Object.keys(args).join(",")}]`;
               }
             }
-            const authTag = urlDirectToken ? ` | directToken(${urlDirectToken.userId})` : urlApiKey ? ` | apiKey=${urlApiKey.slice(0, 12)}\u2026` : "";
+            const authTag = urlDirectToken ? ` | directToken(${urlDirectToken.userId})` : "";
             const id = b?.id != null ? `#${b.id}` : "";
             logger.raw(`[MCP-REQ] ${(/* @__PURE__ */ new Date()).toISOString()} | ${rpcLabel}${id}${authTag}${argsSummary}`);
           }
           const handlePost = () => transport.handleRequest(req, res, body);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handlePost);
-          } else if (urlApiKey) {
-            await apiKeyStorage.run(urlApiKey, handlePost);
-          } else {
-            await handlePost();
-          }
+          await runWithContext(handlePost);
         }
         res.on("finish", async () => {
           await transport.close();

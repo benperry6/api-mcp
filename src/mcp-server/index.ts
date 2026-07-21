@@ -26,39 +26,13 @@ import { resolve } from 'node:path';
 import { registerTools, handleToolCall, getToolsList } from './tools/index.js';
 import { logger } from '../utils/logger.js';
 import { registerResources, handleResourceRead, getResourcesList } from './resources/index.js';
-import { apiKeyStorage, directTokenStorage } from '../auth/api-key-context.js';
-import { getSession, refreshSession, createSession } from '../auth/session.js';
+import { directTokenStorage } from '../auth/api-key-context.js';
+import { classifyMcpPath } from './url-parser.js';
+import { clientRequestStorage, extractClientRequestContext } from '../utils/client-request-context.js';
 
 // 工具/资源注册（模块级，只执行一次）
 registerTools();
 registerResources();
-
-/**
- * 确保 apiKey 对应的 session 有效，自动创建或刷新。
- * 在 apiKeyStorage.run(apiKey) 上下文中执行，session 操作全部路由到 apiKeySessions Map。
- *
- * @note 新增(apiKey-URL 方案): 每次 /mcp/{apiKey} 请求前调用，保证 accessToken 可用。
- *   若 accessToken 有效 → 直接返回；若 refreshToken 可用 → 静默刷新；否则使用 apiKey 重新认证。
- *   认证失败时不中断请求，tools 调用会自然返回「未登录」错误。
- */
-async function ensureApiKeySession(apiKey: string): Promise<void> {
-  await apiKeyStorage.run(apiKey, async () => {
-    const session = getSession();
-    if (session && new Date(session.accessTokenExpiry) > new Date()) return; // accessToken 有效
-
-    if (session?.refreshToken && new Date(session.refreshTokenExpiry) > new Date()) {
-      const refreshed = await refreshSession();
-      if (refreshed) return; // 刷新成功
-    }
-
-    // 使用 apiKey 重新认证
-    try {
-      await createSession('apikey-url-user', apiKey);
-    } catch (e) {
-      logger.warn('AUTH', `[ensureApiKeySession] apiKey URL 自动认证失败: ${e}`);
-    }
-  });
-}
 
 /**
  * 创建并配置 MCP Server 实例（每次连接独立实例，共享模块级 session 状态）
@@ -105,7 +79,8 @@ async function main() {
      *   2. npm run start:https （启动本地 HTTPS MCP Server，无需 ngrok）
      *   3. 填入 https://localhost:3009/mcp（浏览器需信任自签名证书）
      * @note MCP Apps 登录弹窗（_meta.ui.resourceUri）在 ChatGPT 中不可用（VS Code 专属）。
-     *   ChatGPT 中需通过 verify_credentials 传入 loginName+password 或 apiKey 完成认证。
+     *   ChatGPT 中需通过 verify_credentials 传入 loginName+password 完成认证，
+     *   或使用直连 Token URL（/mcp/API@userId@CJ:token）。apiKey 登录已下线。
      */
     const port = parseInt(process.env.CJ_HTTP_PORT || '3009', 10);
 
@@ -128,43 +103,56 @@ async function main() {
       }
 
       /**
-       * @note 新增(apiKey-URL 方案): 同时处理 /mcp、/mcp/{apiKey} 和 /mcp/API@userId@CJ:token 三种路径。
-       *   - /mcp：原有行为，本地 session（currentSession / 文件）
-       *   - /mcp/{apiKey}：从 URL 提取 apiKey，先调用 ensureApiKeySession 自动认证，
-       *     再将请求包装在 apiKeyStorage.run(apiKey) 上下文中执行，session 路由到 apiKeySessions Map。
-       *   - /mcp/API@{userId}@CJ:{accessToken}：从 URL 提取直接 accessToken，无需调用认证 API，
-       *     零服务端内存存储（stateless），将请求包装在 directTokenStorage.run({userId,accessToken}) 中。
+       * @note 下线 apiKey 登录: 只处理 /mcp（本地/密码登录会话）与
+       *   /mcp/API@{userId}@CJ:{accessToken}（直连 Token，stateless）。
+       *   原 /mcp/{apiKey} 自动认证已移除，裸 apiKey 路径由 classifyMcpPath 归入 reject → HTTP 400。
        *
-       * @note 修复(apiKey-URL 方案): GET /mcp 不再尝试解析 body（GET 无 body，会导致 JSON.parse 400）。
-       *   GET 请求（SSE 事件流）直接传 undefined 给 transport.handleRequest。
-       *   POST 请求才读取并解析 body。
-       *
-       * @note 直接 Token URL 格式说明: /mcp/API@{userId}@CJ:{accessToken}
-       *   accessToken 若含 URL 特殊字符（+、/、= 等）须做 URL 编码后填入 ChatGPT 应用 URL。
-       *   Token 过期后需用户更新 ChatGPT 应用的 URL（服务端无存储，无法自动续期）。
+       * @note GET /mcp 不解析 body（GET 无 body）；POST 才读取并解析 body。
+       * @note 直接 Token URL: /mcp/API@{userId}@CJ:{accessToken} 或 /mcp/MCP@...；
+       *   accessToken 含特殊字符（+、/、= 等）须 URL 编码；过期需用户更新 URL（服务端无存储）。
        */
       const urlPath = (req.url ?? '/').split('?')[0];
+      const route = classifyMcpPath(urlPath);
 
-      // 优先检测直接 Token 格式：/mcp/API@{userId}@CJ:{accessToken}
-      const directTokenMatch = urlPath.match(/^\/mcp\/(API@([^@]+)@CJ:(.+))$/);
-      // 其次检测 apiKey 格式：/mcp/{anything}（排除直接 Token 格式）
-      const mcpApiKeyMatch = !directTokenMatch && urlPath.match(/^\/mcp\/(.+)$/);
+      // 已下线的 apiKey URL（/mcp/{非直连 Token}）→ 显式 400
+      if (route?.kind === 'reject') {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: route.reason }));
+        return;
+      }
 
-      const urlApiKey = mcpApiKeyMatch ? decodeURIComponent(mcpApiKeyMatch[1]) : undefined;
-      const urlDirectToken = directTokenMatch
-        ? { userId: directTokenMatch[2], accessToken: decodeURIComponent(directTokenMatch[3]) }
-        : undefined;
+      if (route) {
+        const urlDirectToken = route.kind === 'directToken' ? route.token : undefined;
 
-      const isMcpPath = urlPath === '/mcp' || !!mcpApiKeyMatch || !!directTokenMatch;
-
-      if (isMcpPath) {
-        // apiKey 模式：先确保 session 有效（自动认证/续期），直接 Token 模式无需此步骤
-        if (urlApiKey) {
-          await ensureApiKeySession(urlApiKey);
-        }
+        /**
+         * @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息，修复原始 IP 丢失。
+         *   从入站 req.headers 提取客户端原始请求上下文（IP/host/url/UA/xff），用
+         *   clientRequestStorage 包裹后续处理；出站后端请求（http-client / 各 raw fetch）
+         *   即可从上下文读取并透传 client-request-* 与 x-forwarded-for header。
+         *   与既有 directTokenStorage 嵌套共存（AsyncLocalStorage 互不干扰）。
+         */
+        const clientReqCtx = extractClientRequestContext(req.headers);
+        const runWithContext = (fn: () => Promise<void> | void): Promise<void> | void => {
+          const runInner = urlDirectToken
+            ? () => directTokenStorage.run(urlDirectToken, fn)
+            : fn;
+          return clientRequestStorage.run(clientReqCtx, runInner);
+        };
 
         const mcpServer = createMCPServer();
-        // stateless 模式：无 sessionId，每次请求独立
+        /**
+         * stateless 模式：sessionIdGenerator=undefined，不下发 mcp-session-id，每个请求独立
+         * （新建 Server+Transport，处理完即 close，见下方 res.on('finish')）。
+         *
+         * @note 架构权衡(线上服务重启): 有意保持无状态，不改成有状态。
+         *   代价：客户端(ChatGPT)无法复用已 initialize 的会话，每个「发现回合」
+         *     (tools/list、resources/list、resources/read) 会重新握手，单次连接约多几秒开销
+         *     （其中「双 initialize」是 ChatGPT 客户端行为，服务端无法消除）。
+         *   收益：可在阿里云 ACK 直接多 Pod 水平扩展，无需 SLB 会话保持(sticky)，
+         *     Pod 重启/漂移不丢会话——这是当前部署方式的核心诉求。
+         *   若改有状态：SSE 长连接+后续 POST 必须命中同一 Pod（Redis 存不了活的 transport），
+         *     必须开 sticky 且重启丢会话，与多 Pod 目标冲突，故不采用。
+         */
         const transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: undefined,
         });
@@ -175,19 +163,11 @@ async function main() {
          * POST 请求是 JSON-RPC 调用，需要读取并解析 body。
          */
         if (req.method === 'GET') {
-          const authTag = urlDirectToken
-            ? `directToken(${urlDirectToken.userId})`
-            : urlApiKey ? `apiKey(${urlApiKey.slice(0, 12)}…)` : 'none';
+          const authTag = urlDirectToken ? `directToken(${urlDirectToken.userId})` : 'none';
           logger.raw(`[MCP-REQ] ${new Date().toISOString()} | GET(SSE) | auth=${authTag}`);
 
           const handleGet = () => transport.handleRequest(req, res, undefined);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handleGet);
-          } else if (urlApiKey) {
-            await apiKeyStorage.run(urlApiKey, handleGet);
-          } else {
-            await handleGet();
-          }
+          await runWithContext(handleGet);
         } else {
           // 读取请求 body
           const chunks: Buffer[] = [];
@@ -206,8 +186,7 @@ async function main() {
             return;
           }
 
-          // @note 新增(60次): 外部客户端（ChatGPT）请求实时日志，弥补 Inspector 无法显示外部 Session 的不足
-          // @note 更新(62次): 加入参数摘要（tools/call 时显示参数 key 列表），同时通过 logger.raw 写入日志文件
+          // @note 外部客户端（ChatGPT）请求实时日志，弥补 Inspector 无法显示外部 Session 的不足
           {
             const b = body as Record<string, unknown>;
             let rpcLabel = String(b?.method ?? '?');
@@ -222,21 +201,13 @@ async function main() {
                 argsSummary = ` | args=[${Object.keys(args).join(',')}]`;
               }
             }
-            const authTag = urlDirectToken
-              ? ` | directToken(${urlDirectToken.userId})`
-              : urlApiKey ? ` | apiKey=${urlApiKey.slice(0, 12)}…` : '';
+            const authTag = urlDirectToken ? ` | directToken(${urlDirectToken.userId})` : '';
             const id  = (b as Record<string, unknown>)?.id != null ? `#${(b as Record<string, unknown>).id}` : '';
             logger.raw(`[MCP-REQ] ${new Date().toISOString()} | ${rpcLabel}${id}${authTag}${argsSummary}`);
           }
 
           const handlePost = () => transport.handleRequest(req, res, body);
-          if (urlDirectToken) {
-            await directTokenStorage.run(urlDirectToken, handlePost);
-          } else if (urlApiKey) {
-            await apiKeyStorage.run(urlApiKey, handlePost);
-          } else {
-            await handlePost();
-          }
+          await runWithContext(handlePost);
         }
 
         res.on('finish', async () => {

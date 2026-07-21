@@ -10,6 +10,7 @@ import { httpClient, AuthExpiredError, isApiSuccess } from '../../api-client/htt
 import { ENDPOINTS, API_VERSION_PREFIX } from '../../api-client/endpoints.js';
 import { ensureAccessToken } from '../../auth/session.js';
 import { getEnvConfig } from '../../config/env.js';
+import { buildClientRequestHeaders } from '../../utils/client-request-context.js';
 
 export const logisticsTools: Tool[] = [
   {
@@ -278,7 +279,8 @@ async function handleGetTrackingInfo(args: Record<string, unknown>) {
 
   const res = await fetch(url, {
     method: 'GET',
-    headers: { 'CJ-Access-Token': token ?? '', 'Content-Type': 'application/json' },
+    // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff）到后端
+    headers: { 'CJ-Access-Token': token ?? '', 'Content-Type': 'application/json', ...buildClientRequestHeaders() },
   });
   const data = await res.json();
 

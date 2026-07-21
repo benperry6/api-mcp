@@ -9,6 +9,7 @@ import { getEnvConfig } from '../config/env.js';
 import { rateLimiter, type RateTier } from './rate-limiter.js';
 import { API_VERSION_PREFIX } from './endpoints.js';
 import { logger, isDebugMode } from '../utils/logger.js';
+import { buildClientRequestHeaders } from '../utils/client-request-context.js';
 
 export interface ApiResponse<T = unknown> {
   code: number;
@@ -87,6 +88,13 @@ export class HttpClient {
             headers['CJ-Access-Token'] = token;
           }
         }
+
+        /**
+         * @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息到后端，修复原始 IP 丢失。
+         *   从请求作用域上下文（HTTP 入口注入）读取并合并 client-request-ip/host/url/user-agent
+         *   与 x-forwarded-for。stdio 模式无上下文时返回空对象，不影响本地调用。
+         */
+        Object.assign(headers, buildClientRequestHeaders());
 
         // 发送请求
         const fetchOptions: RequestInit = {

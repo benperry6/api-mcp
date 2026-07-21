@@ -26,8 +26,9 @@ import {
   ensureAccessToken,
   setSessionDirect,
 } from '../../auth/session.js';
-import { getContextApiKey, getDirectTokenContext } from '../../auth/api-key-context.js';
+import { getDirectTokenContext } from '../../auth/api-key-context.js';
 import { rateLimiter } from '../../api-client/rate-limiter.js';
+import { buildClientRequestHeaders } from '../../utils/client-request-context.js';
 
 /**
  * @description MD5 哈希
@@ -55,11 +56,11 @@ export const authTools: Tool[] = [
     name: 'show_login_form',
     description: [
       '展示CJ Dropshipping登录引导信息（仅返回文字，不弹出UI窗口）。',
-      '⚡ 若通过 /mcp/{apiKey} URL 配置接入，会直接返回"已自动认证"状态，无需登录。',
+      '⚡ 若通过 /mcp/API@userId@CJ:token 直连 Token URL 接入，会直接返回"已自动认证"状态，无需登录。',
       '如需弹出登录界面（VS Code Copilot），请直接使用 wait_for_login。',
       '⚠️ Codex / 命令行 / ChatGPT / 无UI环境：请改用 verify_credentials 直接传入邮箱和密码登录。',
       'Show login guidance text only (no UI popup).',
-      '⚡ If connected via /mcp/{apiKey} URL, returns auto-authenticated status immediately.',
+      '⚡ If connected via /mcp/API@userId@CJ:token direct-token URL, returns auto-authenticated status immediately.',
       'For VS Code Copilot with UI, use wait_for_login.',
       '⚠️ Codex/CLI/ChatGPT: use verify_credentials with email+password instead.',
     ].join(' '),
@@ -71,14 +72,13 @@ export const authTools: Tool[] = [
   },
   {
     name: 'verify_credentials',
-    description: '验证用户登录凭据并建立会话。支持两种方式：1) email/loginName+password 前端登录 2) apiKey 直接获取OpenAPI token / Verify user credentials. Supports: 1) email/loginName+password frontend login 2) apiKey direct OpenAPI token exchange',
+    description: '验证用户登录凭据并建立会话：email/loginName + password 前端登录 / Verify credentials via email/loginName + password frontend login.',
     inputSchema: {
       type: 'object' as const,
       properties: {
         loginName: { type: 'string', description: '登录邮箱或用户名（推荐）/ Login email or username (recommended)' },
         email: { type: 'string', description: '登录邮箱（兼容旧版）/ Login email (legacy, use loginName instead)' },
         password: { type: 'string', description: '登录密码 / Login password' },
-        apiKey: { type: 'string', description: '(可选) CJ OpenAPI Key，提供后直接走 getAccessToken，跳过前端登录 / (Optional) CJ OpenAPI Key, skips frontend login' },
       },
       required: [],
     },
@@ -87,9 +87,9 @@ export const authTools: Tool[] = [
     name: 'check_login_status',
     description: [
       '检查当前登录状态和token有效期。',
-      '⚡ 通过 /mcp/{apiKey} URL 配置接入时，会显示"已通过URL apiKey自动认证"。',
+      '⚡ 通过 /mcp/API@userId@CJ:token 直连 Token URL 接入时，会显示"已通过 URL 直接 Token 认证"。',
       'Check current login status and token validity.',
-      '⚡ When connected via /mcp/{apiKey} URL, shows auto-authenticated status.',
+      '⚡ When connected via /mcp/API@userId@CJ:token direct-token URL, shows auto-authenticated status.',
     ].join(' '),
     inputSchema: {
       type: 'object' as const,
@@ -213,11 +213,10 @@ export async function handleAuthTool(
        * @note 基础登录 UI 展示工具。推荐使用 wait_for_login 代替：
        * wait_for_login 会展示 UI 并自动轮询等待用户完成登录，无需用户手动发消息触发后续流程。
        *
-       * @note 纠正(apiKey-URL): 当通过 /mcp/{apiKey} URL 接入时，ensureApiKeySession 已在
-       * 请求到达前完成认证。此时直接返回认证成功状态，告知 AI 无需登录，可直接执行任务。
+       * @note 当通过 /mcp/API@userId@CJ:token 直连 Token URL 接入时，请求已带认证上下文，
+       * 此时直接返回"已认证"状态，告知 AI 无需登录，可直接执行任务。
        */
       {
-        const ctxApiKey = getContextApiKey();
         const directCtx = getDirectTokenContext();
         if (directCtx) {
           return {
@@ -233,24 +232,6 @@ export async function handleAuthTool(
                 ``,
                 `⚠️ 注意：Token 过期后需更新 ChatGPT 应用 URL 中的 token 内容。`,
                 `Note: When token expires, update the token in your ChatGPT app URL.`,
-              ].join('\n'),
-            }],
-          };
-        }
-        if (ctxApiKey && getSession()) {
-          const session = getSession()!;
-          const maskedKey = ctxApiKey.length > 12 ? `${ctxApiKey.slice(0, 12)}…` : ctxApiKey;
-          return {
-            content: [{
-              type: 'text',
-              text: [
-                `✅ 已通过 URL ApiKey 自动完成认证，无需手动登录 / Auto-authenticated via URL apiKey, no login required.`,
-                ``,
-                `🔑 ApiKey: ${maskedKey}`,
-                `👤 用户 / User: ${session.email}`,
-                ``,
-                `🚀 可直接执行任务，例如：查询订单、搜索商品等。`,
-                `You can directly execute tasks such as: query orders, search products, etc.`,
               ].join('\n'),
             }],
           };
@@ -409,6 +390,9 @@ async function fetchCsrfToken(loginApiBase: string): Promise<{ csrfToken: string
       method: 'GET',
       headers: {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders(),
       },
       redirect: 'follow',
     });
@@ -440,41 +424,26 @@ async function handleVerifyCredentials(
    * @note 纠正: 新增 loginName 参数支持用户名登录
    * loginName 优先级高于 email（email 保留作兼容旧调用）
    */
-  const { loginName, email, password, apiKey } = args as { loginName?: string; email?: string; password?: string; apiKey?: string };
+  /**
+   * @note 下线 apiKey 登录(E2): verify_credentials 不再接受 apiKey 入参，
+   *   仅支持 email/loginName + password 前端登录（webLogin 内部若返回账号 apiKey 仍会换 token，见下）。
+   */
+  const { loginName, email, password } = args as { loginName?: string; email?: string; password?: string };
   // loginName 优先，email 作为备选（向后兼容）
   const effectiveLoginName = loginName || email;
 
-  /**
-   * @description apiKey 直登模式
-   * @note 当提供 apiKey 时，直接调用 OpenAPI authentication/getAccessToken
-   * 跳过前端 webLogin 流程，适用于已有 apiKey 的用户
-   * 这是当前推荐的认证方式，后续前端登录也会逐步迁移到此方式
-   */
-  if (apiKey) {
-    try {
-      const session = await createSession(effectiveLoginName || 'apikey-user', apiKey);
-      return {
-        content: [{
-          type: 'text',
-          text: `✅ API Key 认证成功 / API Key authentication successful!\n` +
-            `OpenID: ${session.openId}\n` +
-            `Token有效期 / Token expires: ${session.accessTokenExpiry}\n` +
-            `RefreshToken有效期 / RefreshToken expires: ${session.refreshTokenExpiry}`,
-        }],
-      };
-    } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error);
-      return {
-        content: [{ type: 'text', text: `API Key 认证失败 / API Key authentication failed: ${msg}` }],
-        isError: true,
-      };
-    }
-  }
-
-  // 传统 email/loginName + password 前端登录模式
+  // email/loginName + password 前端登录模式
   if (!effectiveLoginName || !password) {
+    /**
+     * @note 下线 apiKey 登录(E2): 若调用方仍在传 apiKey（老集成/旧指引），给出明确的
+     *   「已下线」提示，与 URL reject 文案一致，避免误以为只是漏填参数。
+     */
+    const triedApiKey = (args as { apiKey?: unknown }).apiKey != null;
+    const text = triedApiKey
+      ? 'apiKey 登录已下线，请改用 email/loginName+password，或直连 Token URL (/mcp/API@userId@CJ:token) / apiKey login removed; use email/loginName+password, or a direct-token URL.'
+      : '请提供 email/loginName+password / Please provide email/loginName+password';
     return {
-      content: [{ type: 'text', text: '请提供 email/loginName+password 或 apiKey / Please provide email/loginName+password or apiKey' }],
+      content: [{ type: 'text', text }],
       isError: true,
     };
   }
@@ -532,6 +501,9 @@ async function handleVerifyCredentials(
         'platform': '2',
         'cj-area': '000000',
         'token': '',
+        // @note 新增(第1次提交 / 26年07月19日): 透传客户端原始请求信息（IP/host/url/UA/xff），
+        //   便于登录侧风控/地域按真实客户端 IP 判断（client-request-* 与浏览器模拟 User-Agent 不冲突）
+        ...buildClientRequestHeaders(),
       },
       body: JSON.stringify({
         loginName: effectiveLoginName,
@@ -763,7 +735,6 @@ function handleCheckLoginStatus(): {
   }
 
   const session = getSession();
-  const ctxApiKey = getContextApiKey();
 
   if (!session) {
     return {
@@ -778,10 +749,8 @@ function handleCheckLoginStatus(): {
   const accessExpiry = new Date(session.accessTokenExpiry);
   const now = new Date();
 
-  // 认证方式标注
-  const authMethod = ctxApiKey
-    ? `🔑 认证方式 / Auth via: URL apiKey (${ctxApiKey.length > 12 ? ctxApiKey.slice(0, 12) + '…' : ctxApiKey})`
-    : `🔑 认证方式 / Auth via: 手动登录 / Manual login`;
+  // 认证方式标注（apiKey URL 登录已下线，此处为手动/密码登录）
+  const authMethod = `🔑 认证方式 / Auth via: 手动登录 / Manual login`;
 
   return {
     content: [{

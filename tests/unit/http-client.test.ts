@@ -3,6 +3,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { HttpClient, AuthExpiredError, setTokenGetter } from '../../src/api-client/http-client';
+import { clientRequestStorage } from '../../src/utils/client-request-context';
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -111,5 +112,50 @@ describe('HttpClient', () => {
 
     const [url] = mockFetch.mock.calls[0];
     expect(url).toContain('lang=en');
+  });
+
+  /**
+   * @note 新增(第1次提交 / 26年07月19日): 验证透传客户端原始请求头，修复 IP 丢失。
+   */
+  describe('客户端原始请求头透传', () => {
+    it('上下文内出站请求携带 client-request-* 与 x-forwarded-for', async () => {
+      mockFetch.mockResolvedValueOnce({
+        json: () => Promise.resolve({ code: 200, result: true, data: {} }),
+      });
+
+      await clientRequestStorage.run(
+        {
+          clientRequestIp: '66.249.66.1',
+          clientRequestUrl: '/mcp',
+          clientRequestHost: 'www.cjdropshipping.com',
+          clientRequestUserAgent: 'Googlebot',
+          xForwardedFor: '66.249.66.1, 172.20.129.142',
+        },
+        () => client.request('/product/query', { body: { keyword: 'x' } })
+      );
+
+      const [, options] = mockFetch.mock.calls[0];
+      // 断言失败说明后端仍拿不到用户原始 IP，风控/地域判断失真
+      expect(options.headers['client-request-ip']).toBe('66.249.66.1');
+      expect(options.headers['client-request-url']).toBe('/mcp');
+      expect(options.headers['client-request-host']).toBe('www.cjdropshipping.com');
+      expect(options.headers['client-request-user-agent']).toBe('Googlebot');
+      expect(options.headers['x-forwarded-for']).toBe('66.249.66.1, 172.20.129.142');
+      // 既有认证头不受影响
+      expect(options.headers['CJ-Access-Token']).toBe('test-token-123');
+    });
+
+    it('无上下文（stdio 模式）出站请求不携带 client-request-* 头', async () => {
+      mockFetch.mockResolvedValueOnce({
+        json: () => Promise.resolve({ code: 200, result: true, data: {} }),
+      });
+
+      await client.request('/product/query', { body: { keyword: 'x' } });
+
+      const [, options] = mockFetch.mock.calls[0];
+      expect(options.headers['client-request-ip']).toBeUndefined();
+      expect(options.headers['client-request-host']).toBeUndefined();
+      expect(options.headers['x-forwarded-for']).toBeUndefined();
+    });
   });
 });
