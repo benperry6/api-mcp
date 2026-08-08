@@ -198,22 +198,46 @@
     /**
      * @description MCP Apps 登录页通信逻辑
      * @note 纠正: 不能使用 window.__MCP_CALL__，MCP Apps 使用 window.parent.postMessage (JSON-RPC 2.0)
-     * 参考 /Users/zhaojuchang/Documents/临时替换文件/mcp测试/src/ui/login.html 的实现模式:
-     * 1. 页面加载时发送 ui/initialize 握手
+     * 流程:
+     * 1. 页面加载时发送 ui/initialize 握手，收到响应后发送 ui/notifications/initialized
      * 2. 表单提交通过 tools/call 调用 verify_credentials
      * 3. 结果通过 notifications/tools/call/result 接收
+     *
+     * @note 纠正(Claude 登录界面不显示): 补齐握手的"完成"环节。
+     *   Claude App 渲染 MCP Apps UI 时，先给 iframe 外层 div 设 visibility:hidden，
+     *   等 UI 完成握手才置为 visible（避免加载闪烁）；收不到完成信号就**永久隐藏**。
+     *   原实现有三处问题导致完成信号永远发不出去：
+     *     1) sendRequest 没有响应回调，无处得知 ui/initialize 已被响应；
+     *     2) 唯一会发完成通知的分支判断 `msg.method === 'ui/initialize'`，
+     *        而 JSON-RPC【响应】只有 id + result、没有 method，永不命中；
+     *     3) 发的名字是 ui/initialized，规范是 ui/notifications/initialized。
+     *   同目录 product/order 四个页面握手正确，所以只有登录页在 Claude 中不显示。
+     *   现改为与那四个页面一致：_pending 响应回调 + 规范的方法名与参数结构。
+     * @see https://github.com/modelcontextprotocol/ext-apps —— View 发 ui/initialize 请求，
+     *   收到响应后发 ui/notifications/initialized 通知；宿主在收到该通知前不会与 View 通信。
      */
     (function() {
+      // 仅在 iframe 环境下启用协议（与 product/order 页面一致），
+      // 否则浏览器直开时 window.parent 就是自身，postMessage 无意义。
+      if (window.parent === window) { return; }
+
       const APP_ID = 'cj-login-' + Math.random().toString(36).substr(2, 9);
       let initialized = false;
+      var _idCounter = 1;
+      var _pending = {};
 
       function postMsg(msg) {
         window.parent.postMessage(msg, '*');
       }
 
-      /** 发送 JSON-RPC request (带 id，期望回复) */
-      function sendRequest(method, params) {
-        postMsg({ jsonrpc: '2.0', id: Date.now(), method: method, params: params || {} });
+      /**
+       * 发送 JSON-RPC request (带 id，期望回复)
+       * @param cb 收到响应后的回调，接收 result
+       */
+      function sendRequest(method, params, cb) {
+        var id = _idCounter++;
+        if (cb) { _pending[id] = cb; }
+        postMsg({ jsonrpc: '2.0', id: id, method: method, params: params || {} });
       }
 
       /** 发送 JSON-RPC notification (无 id) */
@@ -262,13 +286,16 @@
           var msg = event.data;
           if (!msg || msg.jsonrpc !== '2.0') return;
 
-          // 初始化握手响应
-          if (msg.method === 'ui/initialize') {
-            initialized = true;
-            sendNotification('ui/initialized', {
-              appId: APP_ID,
-              protocolVersion: '2026-01-26'
-            });
+          /**
+           * JSON-RPC 响应（只有 id + result/error，没有 method）→ 交给 _pending 回调。
+           * @note 这里是握手能否完成的关键：原实现用 msg.method === 'ui/initialize' 判断，
+           *   响应没有 method 字段，永不命中，导致 ui/notifications/initialized 永远不发。
+           */
+          if (msg.id != null && _pending[msg.id]) {
+            var cb = _pending[msg.id];
+            delete _pending[msg.id];
+            if (cb) { cb(msg.result); }
+            return;
           }
 
           // Tool 调用结果通知
@@ -299,11 +326,19 @@
         }
       });
 
-      // 页面加载时发起握手
+      /**
+       * 页面加载时发起握手，收到响应后发出 ui/notifications/initialized。
+       * 只有这条通知发出去，Claude 才会解除 iframe 外层的 visibility:hidden。
+       * 参数结构与 product/order 页面及 MCP Apps SDK 保持一致。
+       */
       sendRequest('ui/initialize', {
-        appId: APP_ID,
-        appName: 'CJ Login',
-        capabilities: { tools: true, resources: true }
+        appInfo: { name: 'CJ Login', version: '1.0.0' },
+        appCapabilities: {},
+        protocolVersion: '2026-01-26'
+      }, function(result) {
+        initialized = true;
+        sendNotification('ui/notifications/initialized', {});
+        console.log('[MCP Apps] Login UI handshake complete, hostInfo:', result && result.hostInfo);
       });
 
       // 表单提交

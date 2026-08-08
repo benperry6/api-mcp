@@ -17626,7 +17626,6 @@ function md5(str) {
   return (0, import_crypto2.createHash)("md5").update(str).digest("hex");
 }
 var waitForLoginInProgress = false;
-var loginUriSeq = 0;
 var authTools = [
   {
     name: "show_login_form",
@@ -17721,22 +17720,25 @@ var authTools = [
   }
 ];
 var AUTH_LOGIN_UI_BASE = "ui://cj-mcp/login";
+var LOGIN_UI_TOOLS = /* @__PURE__ */ new Set(["show_login_form", "wait_for_login"]);
 function getAuthTools() {
   const valid = isSessionValid();
   return authTools.map((tool) => {
-    if (!valid && tool.name === "show_login_form") {
-      const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
+    if (!valid && LOGIN_UI_TOOLS.has(tool.name)) {
       return {
         ...tool,
         _meta: {
           ui: {
-            resourceUri: uniqueUri
+            resourceUri: AUTH_LOGIN_UI_BASE
           }
         }
       };
     }
     return tool;
   });
+}
+function buildLoginUiMeta() {
+  return { ui: { resourceUri: AUTH_LOGIN_UI_BASE } };
 }
 async function handleAuthTool(name, args) {
   switch (name) {
@@ -17810,7 +17812,8 @@ async function handleAuthTool(name, args) {
               "Please log in using the form below.",
               "After login, let me know and I will call check_login_status to confirm."
             ].join("\n")
-          }]
+          }],
+          _meta: buildLoginUiMeta()
         };
       }
       if (waitForLoginInProgress) {
@@ -17899,6 +17902,24 @@ async function fetchCsrfToken(loginApiBase) {
   }
 }
 async function handleVerifyCredentials(args) {
+  const directCtx = getDirectTokenContext();
+  if (directCtx) {
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `\u274C \u5F53\u524D\u662F URL \u76F4\u63A5 Token \u6A21\u5F0F\uFF0C\u4E0D\u652F\u6301\u8D26\u53F7\u5BC6\u7801\u767B\u5F55 / URL direct token mode: password login unsupported`,
+          `\u{1F464} \u5F53\u524D\u8D26\u53F7 / Current user: ${directCtx.userId}`,
+          ``,
+          `\u8BE5\u6A21\u5F0F\u4E0B\u8D26\u53F7\u5B8C\u5168\u7531\u8FDE\u63A5 URL \u51B3\u5B9A\uFF08/mcp/API@{userId}@CJ:{token}\uFF09\uFF0C`,
+          `\u5373\u4F7F\u767B\u5F55\u6210\u529F\u4E5F\u4E0D\u4F1A\u751F\u6548\u3002\u8981\u6362\u8D26\u53F7\u8BF7\u66F4\u6362 MCP \u8FDE\u63A5 URL \u4E2D\u7684 userId \u4E0E token\u3002`,
+          `Accounts are determined solely by the connection URL; a password login would not take effect.`,
+          `To switch accounts, change the userId/token in your MCP connection URL.`
+        ].join("\n")
+      }],
+      isError: true
+    };
+  }
   const { loginName, email: email2, password } = args;
   const effectiveLoginName = loginName || email2;
   if (!effectiveLoginName || !password) {
@@ -18103,6 +18124,23 @@ function handleRateLimitStatus() {
   return { content: [{ type: "text", text: lines.join("\n") }] };
 }
 function handleLogout() {
+  const directCtx = getDirectTokenContext();
+  if (directCtx) {
+    return {
+      content: [{
+        type: "text",
+        text: [
+          `\u26A0\uFE0F \u5F53\u524D\u662F URL \u76F4\u63A5 Token \u6A21\u5F0F\uFF0C\u65E0\u6CD5\u767B\u51FA / URL direct token mode: logout not possible`,
+          `\u{1F464} \u5F53\u524D\u8D26\u53F7 / Current user: ${directCtx.userId}`,
+          ``,
+          `\u8BA4\u8BC1\u4FE1\u606F\u6765\u81EA\u8FDE\u63A5 URL \u672C\u8EAB\uFF08/mcp/API@{userId}@CJ:{token}\uFF09\uFF0C\u670D\u52A1\u7AEF\u4E0D\u4FDD\u5B58\u4EFB\u4F55\u4F1A\u8BDD\uFF0C`,
+          `\u56E0\u6B64\u6CA1\u6709\u53EF\u6E05\u9664\u7684\u767B\u5F55\u6001\u3002\u8981\u6362\u8D26\u53F7\u53EA\u80FD\u66F4\u6362 MCP \u8FDE\u63A5 URL \u4E2D\u7684 userId \u4E0E token\u3002`,
+          `Credentials come from the connection URL itself; the server stores no session.`,
+          `To switch accounts, change the userId/token in your MCP connection URL.`
+        ].join("\n")
+      }]
+    };
+  }
   const session = getSession();
   const email2 = session?.email || "\u672A\u77E5\u7528\u6237";
   clearSession();

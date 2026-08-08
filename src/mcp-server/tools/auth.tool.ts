@@ -11,9 +11,14 @@
  *   无需用户手动发"继续"消息触发 check_login_status
  *
  * @note 纠正(46次):
- *   - show_login_form 去除 _meta.ui.resourceUri（原因：与 wait_for_login 同时被调用时会打开两个登录窗口）
  *   - wait_for_login 添加 in-progress 防重入（原因：AI 并发调用会打开多个登录窗口）
  *   - Codex/CLI 场景：两个工具均无法渲染 UI，AI 应直接使用 verify_credentials
+ *
+ * @note 纠正(登录 UI 不展示): 登录 UI 的 resourceUri 统一为固定裸 URI 'ui://cj-mcp/login'，
+ *   未登录时同时注入 show_login_form 与 wait_for_login。此前的做法与本注释此处原先的描述
+ *   都不准确，详见 AUTH_LOGIN_UI_BASE 上方的根因说明。
+ *   渲染路径：VS Code Copilot 读 tools/list 的 _meta.ui；Cursor 读 tools/call 结果的 _meta.ui
+ *  （后者由 CJ_UI_IMMEDIATE=true / wait=false 走 buildLoginUiMeta() 立即返回）。
  */
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import { createHash } from 'crypto';
@@ -45,11 +50,6 @@ function md5(str: string): string {
  */
 let waitForLoginInProgress = false;
 
-/**
- * @note 纠正(72次): 单调递增序列号，配合时间戳共同生成唯一的登录 UI resourceUri。
- * 使用 Date.now() 提供可读时间戳，使用序列号防止同毫秒内重复。
- */
-let loginUriSeq = 0;
 
 export const authTools: Tool[] = [
   {
@@ -162,27 +162,36 @@ export const authTools: Tool[] = [
  * 其他工具（show_login_form, verify_credentials, check_login_status）同样注入 _meta.ui。
  */
 /**
- * @note 纠正(73次): getAuthTools() 现在只在未登录时为 wait_for_login / show_login_form
+ * @note 纠正(73次): getAuthTools() 只在未登录时为 wait_for_login / show_login_form
  * 注入 _meta.ui.resourceUri；check_login_status / logout / get_rate_limit_status / verify_credentials
  * 永远不注入 _meta.ui，避免 Cursor 在 tools/list 时误渲染登录 UI（即使已登录也会弹出）。
  * 登录状态由 handleAuthTool() 内部判断，返回相应的文字提示。
+ *
+ * @note 纠正(登录 UI 不展示): resourceUri 必须是**固定裸 URI**，不能带 ?t= 时间戳。
+ *   根因：resources/list 只广播裸 'ui://cj-mcp/login'，客户端拿工具上的 resourceUri
+ *   去已知资源里查，带查询参数就查不到完全匹配项，于是不渲染登录 UI——
+ *   表现为「登录 UI 一直不展示，而商品/订单 UI 正常」。
+ *   handleResourceRead() 用 startsWith 前缀匹配「读得到」，恰好掩盖了「渲染不了」。
+ *   product/order 的展示工具早已因同样原因改用固定 URI（见 product.tool.ts 第4/5次提交），
+ *   登录这条当时漏掉了，此处对齐。
+ *   附带效果：不再每次生成唯一 URI，也就不会「同一登录资源被当成多个不同资源」而弹出多个窗口，
+ *   与 waitForLoginInProgress 防重入形成双保险。
  */
 const AUTH_LOGIN_UI_BASE = 'ui://cj-mcp/login';
+
+/** 未登录时需要展示登录 UI 的工具（其余 auth 工具永不注入 _meta.ui） */
+const LOGIN_UI_TOOLS = new Set(['show_login_form', 'wait_for_login']);
 
 export function getAuthTools(): Tool[] {
   const valid = isSessionValid();
 
   return authTools.map(tool => {
-    // 只有 wait_for_login / show_login_form 需要 _meta.ui（展示登录 UI）
-    // check_login_status / logout / get_rate_limit_status / verify_credentials 永远不注入
-    // 否则 Cursor 在 tools/list 时就会渲染登录 UI，即使已登录也会弹出
-    if (!valid && (tool.name === 'show_login_form')) {
-      const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
+    if (!valid && LOGIN_UI_TOOLS.has(tool.name)) {
       return {
         ...tool,
         _meta: {
           ui: {
-            resourceUri: uniqueUri,
+            resourceUri: AUTH_LOGIN_UI_BASE,
           },
         },
       };
@@ -197,10 +206,13 @@ type AuthToolResult = {
   _meta?: Record<string, unknown>;
 };
 
+/**
+ * 构造 tools/call 结果里的登录 UI meta。
+ * @note Cursor 等客户端从 tools/call 返回结果的 _meta.ui 渲染 UI（VS Code Copilot 则读 tools/list）。
+ *   URI 与 getAuthTools() 保持一致的固定裸 URI，理由见 AUTH_LOGIN_UI_BASE 上方说明。
+ */
 function buildLoginUiMeta(): Record<string, unknown> {
-  // 使用唯一 URI，与 getAuthTools() 中的逻辑保持一致
-  const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
-  return { ui: { resourceUri: uniqueUri } };
+  return { ui: { resourceUri: AUTH_LOGIN_UI_BASE } };
 }
 
 export async function handleAuthTool(
@@ -306,6 +318,7 @@ export async function handleAuthTool(
               'After login, let me know and I will call check_login_status to confirm.',
             ].join('\n'),
           }],
+          _meta: buildLoginUiMeta(),
         };
       }
 
@@ -428,6 +441,32 @@ async function handleVerifyCredentials(
    * @note 下线 apiKey 登录(E2): verify_credentials 不再接受 apiKey 入参，
    *   仅支持 email/loginName + password 前端登录（webLogin 内部若返回账号 apiKey 仍会换 token，见下）。
    */
+  /**
+   * @note 纠正(直连 Token 静默空转): 直连 Token 模式下必须直接拒绝。
+   *   原因：此处若继续走密码登录，会真的请求 webLogin 并把结果写入 currentSession，
+   *   但 getSession()/ensureAccessToken() 在该模式下一律优先返回 URL token 的合成 session，
+   *   写进去的东西永远读不到——表现为「报登录成功，实际仍是原账号」。
+   *   与 handleLogout() 同源：该模式的账号只由连接 URL 决定。
+   */
+  const directCtx = getDirectTokenContext();
+  if (directCtx) {
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `❌ 当前是 URL 直接 Token 模式，不支持账号密码登录 / URL direct token mode: password login unsupported`,
+          `👤 当前账号 / Current user: ${directCtx.userId}`,
+          ``,
+          `该模式下账号完全由连接 URL 决定（/mcp/API@{userId}@CJ:{token}），`,
+          `即使登录成功也不会生效。要换账号请更换 MCP 连接 URL 中的 userId 与 token。`,
+          `Accounts are determined solely by the connection URL; a password login would not take effect.`,
+          `To switch accounts, change the userId/token in your MCP connection URL.`,
+        ].join('\n'),
+      }],
+      isError: true,
+    };
+  }
+
   const { loginName, email, password } = args as { loginName?: string; email?: string; password?: string };
   // loginName 优先，email 作为备选（向后兼容）
   const effectiveLoginName = loginName || email;
@@ -792,10 +831,34 @@ function handleRateLimitStatus(): {
 /**
  * @description 登出处理
  * @note 清除本地会话和持久化 token，方便用户切换账号
+ *
+ * @note 纠正(直连 Token 误报): 直连 Token 模式（/mcp/API@{userId}@CJ:{token}）下认证态
+ *   来自每请求的 AsyncLocalStorage，服务端没有任何可清除的存储，clearSession() 清的
+ *   currentSession + token 文件根本不参与该模式的鉴权。此前仍照常打印「✅ 已登出」，
+ *   导致 AI 与用户以为已登出，实际下一个请求仍用 URL 里的 token 以原账号执行操作。
+ *   现在如实告知：只能通过更换 URL 换号。
  */
 function handleLogout(): {
   content: Array<{ type: string; text: string }>;
 } {
+  const directCtx = getDirectTokenContext();
+  if (directCtx) {
+    return {
+      content: [{
+        type: 'text',
+        text: [
+          `⚠️ 当前是 URL 直接 Token 模式，无法登出 / URL direct token mode: logout not possible`,
+          `👤 当前账号 / Current user: ${directCtx.userId}`,
+          ``,
+          `认证信息来自连接 URL 本身（/mcp/API@{userId}@CJ:{token}），服务端不保存任何会话，`,
+          `因此没有可清除的登录态。要换账号只能更换 MCP 连接 URL 中的 userId 与 token。`,
+          `Credentials come from the connection URL itself; the server stores no session.`,
+          `To switch accounts, change the userId/token in your MCP connection URL.`,
+        ].join('\n'),
+      }],
+    };
+  }
+
   const session = getSession();
   const email = session?.email || '未知用户';
   clearSession();

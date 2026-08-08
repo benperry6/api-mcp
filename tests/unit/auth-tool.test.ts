@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { handleAuthTool, getAuthTools } from '../../src/mcp-server/tools/auth.tool';
+import { getResourcesList } from '../../src/mcp-server/resources';
 
 // Mock session module
 vi.mock('../../src/auth/session', () => ({
@@ -24,6 +25,17 @@ vi.mock('../../src/auth/session', () => ({
   clearSession: vi.fn(),
   ensureAccessToken: vi.fn().mockResolvedValue(null),
 }));
+
+/**
+ * Mock 直连 Token 上下文（/mcp/API@userId@CJ:token）。
+ * 默认 undefined = 普通本地/密码登录模式，不影响既有用例；
+ * 直连 Token 相关用例自行 mockReturnValue 打开。
+ */
+const directTokenMock = vi.hoisted(() => ({
+  directTokenStorage: { run: (_ctx: unknown, fn: () => unknown) => fn() },
+  getDirectTokenContext: vi.fn().mockReturnValue(undefined),
+}));
+vi.mock('../../src/auth/api-key-context', () => directTokenMock);
 
 // Mock env config
 vi.mock('../../src/config/env', () => ({
@@ -116,7 +128,12 @@ describe('auth.tool', () => {
     const result = await handleAuthTool('wait_for_login', { timeout: 10 });
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain('已登录');
-    expect(result._meta?.ui).toBeDefined();
+    /**
+     * @note 已登录时不得返回登录 UI meta。
+     * 业务影响：否则 Cursor / VS Code Copilet 会对已登录用户再弹一次登录表单
+     *（源码注释记录过「即使已登录也会弹出」这个真实缺陷）。
+     */
+    expect(result._meta?.ui).toBeUndefined();
   });
 
   it('wait_for_login 在 CJ_UI_IMMEDIATE=true 时立即返回登录 UI meta', async () => {
@@ -124,33 +141,54 @@ describe('auth.tool', () => {
     const result = await handleAuthTool('wait_for_login', {});
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain('登录界面');
-    expect((result._meta as { ui?: { resourceUri?: string } })?.ui?.resourceUri).toMatch(/^ui:\/\/cj-mcp\/login\?t=/);
+    /**
+     * @note 必须是固定裸 URI，不能带 ?t= 时间戳。
+     * 业务影响：带查询参数的 URI 在 resources/list 里没有对应条目，
+     * 客户端查不到该资源就不会渲染登录 UI —— 这正是「登录 UI 一直不展示，
+     * 而商品/订单 UI 正常」的根因（product/order 已在第4/5次提交改用固定 URI）。
+     */
+    expect((result._meta as { ui?: { resourceUri?: string } })?.ui?.resourceUri).toBe('ui://cj-mcp/login');
     vi.unstubAllEnvs();
   });
 
   /**
-   * @note 纠正(72次): 验证 getAuthTools() 每次调用都生成唯一的 resourceUri（含时间戳），
-   * 确保 VS Code Copilot 在同一对话中多次登录时，每次都在当前位置创建新的登录 UI，
-   * 而非复用/滚动到之前位置的旧 UI 元素。
-   * 业务影响：修复「多次登录-退出-再登录，新登录 UI 无法出现在当前对话位置」的 UX 缺陷。
+   * @note 根因回归：登录 UI 一直不展示，而商品/订单 UI 正常。
+   * 差异只有一处——登录工具的 resourceUri 带 `?t=<时间戳>_<序号>`，
+   * 而 resources/list 只广播裸 `ui://cj-mcp/login`，客户端在已知资源里
+   * 查不到完全匹配项就不渲染。服务端 handleResourceRead 用 startsWith
+   * 前缀匹配「读得到」，掩盖了「渲染不了」。
+   * 业务影响：断言失败 = 用户在任何 MCP Apps 客户端都看不到登录界面。
    */
-  it('getAuthTools 每次调用 wait_for_login 的 resourceUri 均唯一（含时间戳）', () => {
-    const tools1 = getAuthTools();
-    const tools2 = getAuthTools();
+  it('登录工具注入的 resourceUri 必须能在 resources/list 中找到完全匹配项', () => {
+    const advertised = new Set(getResourcesList().map(r => r.uri));
+    // 前置确认：登录资源确实以裸 URI 广播
+    expect(advertised.has('ui://cj-mcp/login')).toBe(true);
 
-    const waitLogin1 = tools1.find(t => t.name === 'wait_for_login');
-    const waitLogin2 = tools2.find(t => t.name === 'wait_for_login');
+    const tools = getAuthTools();
+    const loginUiTools = tools.filter(
+      t => (t as { _meta?: { ui?: { resourceUri?: string } } })._meta?.ui?.resourceUri
+    );
+    // 未登录时，show_login_form 与 wait_for_login 都应带登录 UI
+    expect(loginUiTools.map(t => t.name).sort()).toEqual(['show_login_form', 'wait_for_login']);
 
-    expect(waitLogin1).toBeDefined();
-    expect(waitLogin2).toBeDefined();
+    for (const tool of loginUiTools) {
+      const uri = (tool as { _meta?: { ui?: { resourceUri?: string } } })._meta!.ui!.resourceUri!;
+      expect(uri).toBe('ui://cj-mcp/login');
+      expect(advertised.has(uri)).toBe(true);
+    }
+  });
 
-    const meta1 = (waitLogin1 as { _meta?: { ui?: { resourceUri?: string } } })._meta;
-    const meta2 = (waitLogin2 as { _meta?: { ui?: { resourceUri?: string } } })._meta;
+  /**
+   * @note 已登录时不得注入任何登录 UI，避免对已登录用户弹登录表单。
+   */
+  it('getAuthTools 在已登录时不为任何工具注入登录 UI', async () => {
+    const sessionModule = await import('../../src/auth/session');
+    vi.mocked(sessionModule.isSessionValid).mockReturnValueOnce(true);
 
-    expect(meta1?.ui?.resourceUri).toMatch(/^ui:\/\/cj-mcp\/login\?t=\d+_\d+$/);
-    expect(meta2?.ui?.resourceUri).toMatch(/^ui:\/\/cj-mcp\/login\?t=\d+_\d+$/);
-    // 两次调用的时间戳不同（唯一性），断言失败说明用户在同一对话中无法获得新的登录 UI
-    expect(meta1?.ui?.resourceUri).not.toBe(meta2?.ui?.resourceUri);
+    const withUi = getAuthTools().filter(
+      t => (t as { _meta?: { ui?: { resourceUri?: string } } })._meta?.ui?.resourceUri
+    );
+    expect(withUi).toEqual([]);
   });
 });
 
@@ -484,5 +522,59 @@ describe('verify_credentials - webLogin 响应字段处理', () => {
     expect(sessionModule.setSessionDirect).toHaveBeenCalled();
     const callArg = sessionModule.setSessionDirect.mock.calls[0][0];
     expect(callArg.accessToken).toBe('USR@CJ999@L0@CJ:no_csrf_jwt_token');
+  });
+});
+
+/**
+ * @note 直连 Token 模式（URL = /mcp/API@{userId}@CJ:{token}）下的换号语义。
+ *
+ * 该模式的认证态来自每请求的 AsyncLocalStorage，服务端无任何可清除的存储，
+ * 因此「换号」只能靠用户改 URL。此前 logout 与 verify_credentials 都会
+ * 假报成功，误导 AI 与用户以为已经换号/登出：
+ * - logout 只清进程内 currentSession + token 文件，却打印「✅ 已登出」
+ * - verify_credentials 真登录、真写 currentSession、真报成功，但之后
+ *   getSession() 仍优先返回 URL token 的合成 session，结果永远读不到
+ */
+describe('直连 Token 模式下的换号语义', () => {
+  beforeEach(() => {
+    directTokenMock.getDirectTokenContext.mockReturnValue({
+      userId: 'CJ620569',
+      accessToken: 'url_direct_token',
+    });
+  });
+
+  afterEach(() => {
+    directTokenMock.getDirectTokenContext.mockReturnValue(undefined);
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * 业务影响：断言失败 = 用户以为已登出并让 AI 继续换号，
+   * 实际下一个请求仍用 URL 里的 token 以原账号执行操作。
+   */
+  it('logout 不谎报成功，明确告知需更换 URL 才能换号', async () => {
+    const result = await handleAuthTool('logout', {});
+    expect(result.content[0].text).not.toContain('已登出');
+    expect(result.content[0].text).toMatch(/URL/);
+    expect(result.content[0].text).toContain('CJ620569');
+  });
+
+  /**
+   * 业务影响：断言失败 = verify_credentials 静默空转，
+   * AI 收到「登录成功」却仍以旧账号调用业务接口。
+   */
+  it('verify_credentials 直接拒绝并说明原因，不发起登录请求', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await handleAuthTool('verify_credentials', {
+      loginName: 'other@cj.com',
+      password: 'pw',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/URL/);
+    // 不得真的去登录（否则会写入一个永远读不到的 session）
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
