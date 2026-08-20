@@ -59,6 +59,8 @@ export const ENDPOINTS = {
     deleteOrder: '/shopping/order/deleteOrder',
     confirmOrder: '/shopping/order/confirmOrder',
     queryCogs: '/shopping/order/queryCogsBasicDataOrderInfoList',
+    makeupList: '/shopping/makeup/list',
+    createMakeupPayOrder: '/shopping/makeup/createPayOrder',
   },
 
   // === Disputes ===

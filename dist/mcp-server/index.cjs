@@ -17157,7 +17157,9 @@ var ENDPOINTS = {
     payBalanceV2: "/shopping/pay/payBalanceV2",
     deleteOrder: "/shopping/order/deleteOrder",
     confirmOrder: "/shopping/order/confirmOrder",
-    queryCogs: "/shopping/order/queryCogsBasicDataOrderInfoList"
+    queryCogs: "/shopping/order/queryCogsBasicDataOrderInfoList",
+    makeupList: "/shopping/makeup/list",
+    createMakeupPayOrder: "/shopping/makeup/createPayOrder"
   },
   // === Disputes ===
   disputes: {
@@ -19892,6 +19894,39 @@ var orderTools = [
     }
   },
   {
+    name: "list_makeup_orders",
+    description: "Read unpaid CJ makeup/supplement bills from the official POST /shopping/makeup/list endpoint. Returns exact BT bill codes, linked CJ order codes, amounts, statuses and reasons. Read-only; never creates or pays anything.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pageNum: { type: "number", minimum: 1, description: "Page number, default 1" },
+        pageSize: { type: "number", minimum: 1, maximum: 200, description: "Page size, default 10, max 200" },
+        type: { type: "number", enum: [0, 1], description: "0=Make-up Orders, 1=Other Make-up" },
+        diffUseType: { type: "number", enum: [0, 1, 2, 3], description: "For type=1: 1=Balance Top-up, 2=Repayment, 3=Transfer Shipping Fee" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "create_makeup_payment_order",
+    description: "\u26A0\uFE0F Create a CJ payment order/link for an exact frozen set of unpaid BT makeup bills via the official POST /shopping/makeup/createPayOrder endpoint. This creates a payment object only: it NEVER pays, deducts balance, enters card data or proves payment. Use only BT codes returned by a fresh list_makeup_orders readback.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        orderCodes: {
+          type: "array",
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: "string", pattern: "^BT[A-Za-z0-9]+$" },
+          description: "Exact unique BT bill codes from list_makeup_orders"
+        },
+        type: { type: "number", enum: [0, 1], description: "0=Make-up Orders, 1=Other Make-up; default 0" },
+        diffUseType: { type: "number", enum: [0, 1, 2, 3], description: "Required for type=1: 1, 2 or 3; for type=0 omit or use 0" }
+      },
+      required: ["orderCodes"]
+    }
+  },
+  {
     name: "get_order_detail",
     description: '\u67E5\u8BE2CJ\u5355\u4E2A\u8BA2\u5355\u7684\u5B8C\u6574\u8BE6\u60C5\uFF0C\u5305\u62EC\u8BA2\u5355\u72B6\u6001\u3001\u6536\u8D27\u5730\u5740\u3001\u5546\u54C1\u6E05\u5355\u3001\u7269\u6D41\u4FE1\u606F\u3001\u91D1\u989D\u660E\u7EC6\u7B49\u3002\n\u3010\u4E24\u6B65\u5C55\u793A\u6D41\u7A0B - \u5FC5\u987B\u6309\u987A\u5E8F\u6267\u884C\u3011\n  \u7B2C1\u6B65\uFF1A\u5148\u8C03\u7528\u672C\u5DE5\u5177 get_order_detail(orderId) \u83B7\u53D6\u6700\u65B0\u6570\u636E\n  \u7B2C2\u6B65\uFF1A\u518D\u8C03\u7528 show_order_detail(orderId) \u6253\u5F00\u53EF\u89C6\u5316\u8BE6\u60C5\u754C\u9762\uFF08\u6570\u636E\u5DF2\u7F13\u5B58\uFF09\n\u26A0\uFE0F \u672C\u5DE5\u5177\u4EC5\u83B7\u53D6\u6570\u636E\uFF0C\u4E0D\u6E32\u67D3 UI\uFF1BUI \u6E32\u67D3\u7531 show_order_detail(orderId) \u72EC\u7ACB\u5B8C\u6210\u3002\n\u26A0\uFE0F \u4E0D\u8981\u5C1D\u8BD5\u5728\u672C\u5DE5\u5177\u7684\u8FD4\u56DE\u7ED3\u679C\u4E2D\u6CE8\u5165 _meta.ui\uFF0C\u90A3\u6837\u4F1A\u5BFC\u81F4 UI \u5728\u6570\u636E\u5230\u8FBE\u524D\u5C31\u6E32\u67D3\uFF08\u65E7\u6570\u636E\uFF09\u3002\n\u3010\u610F\u56FE\u6620\u5C04\u3011\n- \u7528\u6237\u8BF4\u300C\u8FD9\u4E2A\u8BA2\u5355\u7684\u8BE6\u60C5\u300D\u300C\u8BA2\u5355\u8BE6\u7EC6\u4FE1\u606F\u300D\u300C\u67E5\u4E00\u4E0B\u8FD9\u7B14\u8BA2\u5355\u300D\u2192 \u4F7F\u7528\u6B64\u5DE5\u5177\n- \u7528\u6237\u8BF4\u300C\u8FD9\u4E2A\u8BA2\u5355\u53D1\u8D27\u4E86\u5417\u300D\u300C\u6211\u7684\u5305\u88F9\u5728\u54EA\u300D\u2192 \u4F7F\u7528\u6B64\u5DE5\u5177\n- orderId \u5FC5\u586B / orderId is required.\n\u3010\u7269\u6D41\u8FFD\u8E2A\u4E8C\u6B65\u6D41\u7A0B\u3011\n- \u82E5\u7528\u6237\u95EE\u300C\u5305\u88F9\u5230\u54EA\u4E86\u300D\u300C\u7269\u6D41\u8FDB\u5EA6\u300D\u300C\u5FEB\u9012\u72B6\u6001\u300D\u2192 \u7B2C\u4E00\u6B65\u8C03\u7528\u6B64\u5DE5\u5177\u62FF\u5230 trackNumber\uFF0C\u7B2C\u4E8C\u6B65\u8C03\u7528 get_tracking_info([trackNumber])\n\u3010Two-step display - MUST call in order\u3011\n  Step1: Call this tool (get_order_detail) to fetch data\n  Step2: Call show_order_detail(orderId) to render the visual detail UI (data already cached)\n\u26A0\uFE0F This tool fetches data ONLY; UI rendering is done by show_order_detail(orderId) separately.\n[Intent mapping] "order detail" / "order status" / "has it shipped" \u2192 this tool.',
     inputSchema: {
@@ -20022,7 +20057,8 @@ var READ_ONLY_ORDER_TOOLS = /* @__PURE__ */ new Set([
   "get_order_detail",
   "get_account_balance",
   "get_merge_progress",
-  "query_cogs"
+  "query_cogs",
+  "list_makeup_orders"
 ]);
 function getOrderTools() {
   const seq = ++orderListUriSeq;
@@ -20354,6 +20390,65 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
         });
         if (!isApiSuccess(response)) {
           return { content: [{ type: "text", text: `\u8BF7\u6C42\u5931\u8D25 / Request failed: ${response.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      }
+      case "list_makeup_orders": {
+        const rawType = args.type;
+        if (rawType !== void 0 && rawType !== 0 && rawType !== 1) {
+          return { content: [{ type: "text", text: "type must be 0 or 1" }], isError: true };
+        }
+        const rawDiffUseType = args.diffUseType;
+        if (rawDiffUseType !== void 0 && ![0, 1, 2, 3].includes(rawDiffUseType)) {
+          return { content: [{ type: "text", text: "diffUseType must be 0, 1, 2 or 3" }], isError: true };
+        }
+        const body = {
+          pageNum: Math.max(1, Number(args.pageNum) || 1),
+          pageSize: Math.min(200, Math.max(1, Number(args.pageSize) || 10))
+        };
+        if (rawType !== void 0) body.type = rawType;
+        if (rawDiffUseType !== void 0) body.diffUseType = rawDiffUseType;
+        const response = await httpClient.request(ENDPOINTS.shopping.makeupList, {
+          method: "POST",
+          body,
+          tier: "read"
+        });
+        if (!isApiSuccess(response)) {
+          return { content: [{ type: "text", text: `Request failed [${response.code}]: ${response.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      }
+      case "create_makeup_payment_order": {
+        if (!Array.isArray(args.orderCodes) || args.orderCodes.length === 0) {
+          return { content: [{ type: "text", text: "orderCodes must contain at least one BT bill code" }], isError: true };
+        }
+        const orderCodes = args.orderCodes.map(String);
+        if (orderCodes.some((code) => !/^BT[A-Za-z0-9]+$/.test(code))) {
+          return { content: [{ type: "text", text: "Every orderCode must be an exact BT bill code" }], isError: true };
+        }
+        if (new Set(orderCodes).size !== orderCodes.length) {
+          return { content: [{ type: "text", text: "orderCodes must not contain duplicate BT bills" }], isError: true };
+        }
+        const type = args.type === void 0 ? 0 : args.type;
+        if (type !== 0 && type !== 1) {
+          return { content: [{ type: "text", text: "type must be 0 or 1" }], isError: true };
+        }
+        const diffUseType = args.diffUseType;
+        if (type === 1 && ![1, 2, 3].includes(diffUseType)) {
+          return { content: [{ type: "text", text: "diffUseType must be 1, 2 or 3 when type=1" }], isError: true };
+        }
+        if (type === 0 && diffUseType !== void 0 && diffUseType !== 0) {
+          return { content: [{ type: "text", text: "diffUseType must be omitted or 0 when type=0" }], isError: true };
+        }
+        const body = { orderCodes, type };
+        if (diffUseType !== void 0) body.diffUseType = diffUseType;
+        const response = await httpClient.request(ENDPOINTS.shopping.createMakeupPayOrder, {
+          method: "POST",
+          body,
+          tier: "write"
+        });
+        if (!isApiSuccess(response)) {
+          return { content: [{ type: "text", text: `Request failed [${response.code}]: ${response.message}` }], isError: true };
         }
         return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
       }
@@ -21406,6 +21501,8 @@ var SENSITIVE_TOOLS = /* @__PURE__ */ new Set([
   // 从购物车内 orderId 继续：确认→生成支付单
   "generate_payment_link",
   // 从 shipmentsId 生成支付单
+  "create_makeup_payment_order",
+  // 为精确 BT 补款单生成支付对象（不扣款）
   "add_to_cart",
   // 加入购物车
   "merge_orders",
@@ -21444,6 +21541,7 @@ function getConfirmationPrompt(toolName, args) {
     submit_order_to_cart: "\u{1F6D2} \u5373\u5C06\u6267\u884C\uFF1A\u52A0\u8D2D\u7269\u8F66\u2192\u786E\u8BA4\u8D2D\u7269\u8F66\u2192\u751F\u6210\u652F\u4ED8\u5355 / About to: addCart \u2192 addCartConfirm \u2192 generatePayment",
     confirm_cart_and_pay: "\u{1F6D2} \u5373\u5C06\u6267\u884C\uFF1A\u786E\u8BA4\u8D2D\u7269\u8F66\u2192\u751F\u6210\u652F\u4ED8\u5355 / About to: addCartConfirm \u2192 generatePayment",
     generate_payment_link: "\u{1F4B3} \u5373\u5C06\u4ECE shipmentsId \u751F\u6210\u652F\u4ED8\u5355\uFF08\u6D89\u53CA\u8D44\u91D1\uFF09/ About to generate payment order from shipmentsId",
+    create_makeup_payment_order: "\u{1F4B3} \u5373\u5C06\u4E3A\u7CBE\u786E BT \u8865\u6B3E\u5355\u751F\u6210\u652F\u4ED8\u5BF9\u8C61\uFF08\u53EA\u751F\u6210\u94FE\u63A5\uFF0C\u4E0D\u6263\u6B3E\uFF09/ About to create a payment object for exact BT makeup bills (no charge)",
     add_to_cart: "\u{1F6D2} \u5373\u5C06\u6DFB\u52A0\u5546\u54C1\u5230\u8D2D\u7269\u8F66 / About to add item to cart",
     merge_orders: "\u{1F4E6} \u5373\u5C06\u6267\u884C\u5408\u5355\u64CD\u4F5C\uFF08\u4E0D\u53EF\u64A4\u9500\uFF09/ About to merge orders (irreversible)",
     create_dispute: "\u26A0\uFE0F \u5373\u5C06\u53D1\u8D77\u7EA0\u7EB7 / About to create a dispute",

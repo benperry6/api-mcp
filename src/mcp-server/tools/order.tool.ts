@@ -10,6 +10,14 @@ import { ensureAccessToken } from '../../auth/session.js';
 import { getEnvConfig } from '../../config/env.js';
 import { logger, isDebugMode } from '../../utils/logger.js';
 import { setOrderListCache, setOrderDetailCache, getOrderListCache, getOrderDetailCache } from '../resources/index.js';
+import type {
+  CreateMakeupPaymentOrderRequest,
+  CreateMakeupPaymentOrderResponse,
+  MakeupDiffUseType,
+  MakeupListRequest,
+  MakeupListResponse,
+  MakeupType,
+} from '../../types/makeup.types.js';
 
 export const orderTools: Tool[] = [
   {
@@ -264,6 +272,44 @@ export const orderTools: Tool[] = [
     },
   },
   {
+    name: 'list_makeup_orders',
+    description:
+      'Read unpaid CJ makeup/supplement bills from the official POST /shopping/makeup/list endpoint. ' +
+      'Returns exact BT bill codes, linked CJ order codes, amounts, statuses and reasons. Read-only; never creates or pays anything.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        pageNum: { type: 'number', minimum: 1, description: 'Page number, default 1' },
+        pageSize: { type: 'number', minimum: 1, maximum: 200, description: 'Page size, default 10, max 200' },
+        type: { type: 'number', enum: [0, 1], description: '0=Make-up Orders, 1=Other Make-up' },
+        diffUseType: { type: 'number', enum: [0, 1, 2, 3], description: 'For type=1: 1=Balance Top-up, 2=Repayment, 3=Transfer Shipping Fee' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'create_makeup_payment_order',
+    description:
+      '⚠️ Create a CJ payment order/link for an exact frozen set of unpaid BT makeup bills via the official ' +
+      'POST /shopping/makeup/createPayOrder endpoint. This creates a payment object only: it NEVER pays, deducts balance, ' +
+      'enters card data or proves payment. Use only BT codes returned by a fresh list_makeup_orders readback.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        orderCodes: {
+          type: 'array',
+          minItems: 1,
+          uniqueItems: true,
+          items: { type: 'string', pattern: '^BT[A-Za-z0-9]+$' },
+          description: 'Exact unique BT bill codes from list_makeup_orders',
+        },
+        type: { type: 'number', enum: [0, 1], description: '0=Make-up Orders, 1=Other Make-up; default 0' },
+        diffUseType: { type: 'number', enum: [0, 1, 2, 3], description: 'Required for type=1: 1, 2 or 3; for type=0 omit or use 0' },
+      },
+      required: ['orderCodes'],
+    },
+  },
+  {
     name: 'get_order_detail',
     description:
       '查询CJ单个订单的完整详情，包括订单状态、收货地址、商品清单、物流信息、金额明细等。\n' +
@@ -453,7 +499,7 @@ const ORDER_DETAIL_UI_URI = 'ui://cj-mcp/order-detail';
 
 const READ_ONLY_ORDER_TOOLS = new Set([
   'get_order_list', 'get_pay_order_list', 'get_order_detail',
-  'get_account_balance', 'get_merge_progress', 'query_cogs',
+  'get_account_balance', 'get_merge_progress', 'query_cogs', 'list_makeup_orders',
 ]);
 
 export function getOrderTools(): Tool[] {
@@ -828,6 +874,69 @@ export async function handleOrderTool(
           }
           return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
         }
+
+      case 'list_makeup_orders': {
+        const rawType = args.type;
+        if (rawType !== undefined && rawType !== 0 && rawType !== 1) {
+          return { content: [{ type: 'text', text: 'type must be 0 or 1' }], isError: true };
+        }
+        const rawDiffUseType = args.diffUseType;
+        if (rawDiffUseType !== undefined && ![0, 1, 2, 3].includes(rawDiffUseType as number)) {
+          return { content: [{ type: 'text', text: 'diffUseType must be 0, 1, 2 or 3' }], isError: true };
+        }
+        const body: MakeupListRequest = {
+          pageNum: Math.max(1, Number(args.pageNum) || 1),
+          pageSize: Math.min(200, Math.max(1, Number(args.pageSize) || 10)),
+        };
+        if (rawType !== undefined) body.type = rawType as MakeupType;
+        if (rawDiffUseType !== undefined) body.diffUseType = rawDiffUseType as MakeupDiffUseType;
+
+        const response = await httpClient.request<MakeupListResponse>(ENDPOINTS.shopping.makeupList, {
+          method: 'POST',
+          body,
+          tier: 'read',
+        });
+        if (!isApiSuccess(response)) {
+          return { content: [{ type: 'text', text: `Request failed [${response.code}]: ${response.message}` }], isError: true };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
+      }
+
+      case 'create_makeup_payment_order': {
+        if (!Array.isArray(args.orderCodes) || args.orderCodes.length === 0) {
+          return { content: [{ type: 'text', text: 'orderCodes must contain at least one BT bill code' }], isError: true };
+        }
+        const orderCodes = args.orderCodes.map(String);
+        if (orderCodes.some(code => !/^BT[A-Za-z0-9]+$/.test(code))) {
+          return { content: [{ type: 'text', text: 'Every orderCode must be an exact BT bill code' }], isError: true };
+        }
+        if (new Set(orderCodes).size !== orderCodes.length) {
+          return { content: [{ type: 'text', text: 'orderCodes must not contain duplicate BT bills' }], isError: true };
+        }
+        const type = args.type === undefined ? 0 : args.type;
+        if (type !== 0 && type !== 1) {
+          return { content: [{ type: 'text', text: 'type must be 0 or 1' }], isError: true };
+        }
+        const diffUseType = args.diffUseType;
+        if (type === 1 && ![1, 2, 3].includes(diffUseType as number)) {
+          return { content: [{ type: 'text', text: 'diffUseType must be 1, 2 or 3 when type=1' }], isError: true };
+        }
+        if (type === 0 && diffUseType !== undefined && diffUseType !== 0) {
+          return { content: [{ type: 'text', text: 'diffUseType must be omitted or 0 when type=0' }], isError: true };
+        }
+
+        const body: CreateMakeupPaymentOrderRequest = { orderCodes, type: type as MakeupType };
+        if (diffUseType !== undefined) body.diffUseType = diffUseType as MakeupDiffUseType;
+        const response = await httpClient.request<CreateMakeupPaymentOrderResponse>(ENDPOINTS.shopping.createMakeupPayOrder, {
+          method: 'POST',
+          body,
+          tier: 'write',
+        });
+        if (!isApiSuccess(response)) {
+          return { content: [{ type: 'text', text: `Request failed [${response.code}]: ${response.message}` }], isError: true };
+        }
+        return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
+      }
 
       case 'get_order_list': {
         /**
