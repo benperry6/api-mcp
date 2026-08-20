@@ -2,7 +2,7 @@
  * @fileoverview HTTP Client 单元测试 (Mock fetch)
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { HttpClient, AuthExpiredError, setTokenGetter } from '../../src/api-client/http-client';
+import { HttpClient, AuthExpiredError, setTokenGetter, getAuthHeaderName } from '../../src/api-client/http-client';
 
 // Mock fetch
 const mockFetch = vi.fn();
@@ -70,6 +70,25 @@ describe('HttpClient', () => {
     expect(options.headers['Content-Type']).toBe('application/json');
     expect(result.code).toBe(200);
     expect(result.data).toEqual({ id: 1 });
+  });
+
+  it('本地 MCP/web login token 使用 token header 而不是 CJ-Access-Token', async () => {
+    setTokenGetter(() => 'MCP@CJ123456@L5@CJ:redacted-jwt');
+    mockFetch.mockResolvedValueOnce({
+      json: () => Promise.resolve({ code: 0, success: true, message: null, data: [] }),
+    });
+
+    await client.request('/product/globalWarehouseList', { method: 'GET' });
+
+    const [, options] = mockFetch.mock.calls[0];
+    expect(options.headers.token).toBe('MCP@CJ123456@L5@CJ:redacted-jwt');
+    expect(options.headers['CJ-Access-Token']).toBeUndefined();
+  });
+
+  it('sélecteur de header auth distingue token MCP et token OpenAPI', () => {
+    expect(getAuthHeaderName('MCP@CJ123456@L5@CJ:redacted-jwt')).toBe('token');
+    expect(getAuthHeaderName('USR@CJ123456@L5@CJ:redacted-jwt')).toBe('token');
+    expect(getAuthHeaderName('plain-openapi-access-token')).toBe('CJ-Access-Token');
   });
 
   it('skipAuth 时不携带 token', async () => {

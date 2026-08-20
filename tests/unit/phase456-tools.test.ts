@@ -99,12 +99,21 @@ describe('order.tool', () => {
     expect(result.isError).toBeUndefined();
   });
 
-  it('get_pay_order_list 调用正确端点（已修正为 /shopping/order/list）', async () => {
-    await handleOrderTool('get_pay_order_list', { pageNum: 1 });
+  it('get_pay_order_list uses GET query parameters without a POST body', async () => {
+    await handleOrderTool('get_pay_order_list', { pageNum: 2, pageSize: 80 });
     expect(mockRequest).toHaveBeenCalledWith(
       '/shopping/order/list',
-      expect.objectContaining({ tier: 'read' })
+      {
+        method: 'GET',
+        params: {
+          pageNum: '2',
+          pageSize: '50',
+          status: 'UNPAID',
+        },
+        tier: 'read',
+      }
     );
+    expect(mockRequest.mock.calls.at(-1)?.[1]).not.toHaveProperty('body');
   });
 
   /**

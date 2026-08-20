@@ -17374,6 +17374,9 @@ var tokenGetter = null;
 function setTokenGetter(fn) {
   tokenGetter = fn;
 }
+function getAuthHeaderName(token) {
+  return /^(MCP|USR)@/.test(token) ? "token" : "CJ-Access-Token";
+}
 var HttpClient = class {
   baseUrl;
   constructor() {
@@ -17403,7 +17406,7 @@ var HttpClient = class {
         if (!skipAuth && tokenGetter) {
           const token = tokenGetter();
           if (token) {
-            headers["CJ-Access-Token"] = token;
+            headers[getAuthHeaderName(token)] = token;
           }
         }
         const fetchOptions = {
@@ -17725,7 +17728,7 @@ var AUTH_LOGIN_UI_BASE = "ui://cj-mcp/login";
 function getAuthTools() {
   const valid = isSessionValid();
   return authTools.map((tool) => {
-    if (!valid && tool.name === "show_login_form") {
+    if (!valid && (tool.name === "wait_for_login" || tool.name === "show_login_form")) {
       const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
       return {
         ...tool,
@@ -17738,6 +17741,10 @@ function getAuthTools() {
     }
     return tool;
   });
+}
+function buildLoginUiMeta() {
+  const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
+  return { ui: { resourceUri: uniqueUri } };
 }
 async function handleAuthTool(name, args) {
   switch (name) {
@@ -17807,7 +17814,7 @@ async function handleAuthTool(name, args) {
     case "wait_for_login": {
       if (isSessionValid()) {
         const session = getSession();
-        const user = session?.loginName || session?.email || "\u5DF2\u767B\u5F55";
+        const user = (session && "loginName" in session ? String(session.loginName) : session?.email) || "\u5DF2\u767B\u5F55";
         return {
           content: [{
             type: "text",
@@ -17815,7 +17822,8 @@ async function handleAuthTool(name, args) {
               `\u2705 \u5DF2\u767B\u5F55\uFF0C\u65E0\u9700\u91CD\u590D\u767B\u5F55 / Already logged in`,
               `\u7528\u6237 / User: ${user}`
             ].join("\n")
-          }]
+          }],
+          _meta: buildLoginUiMeta()
         };
       }
       const immediateUi = process.env.CJ_UI_IMMEDIATE === "true" || args.wait === false;
@@ -17830,7 +17838,8 @@ async function handleAuthTool(name, args) {
               "Please log in using the form below.",
               "After login, let me know and I will call check_login_status to confirm."
             ].join("\n")
-          }]
+          }],
+          _meta: buildLoginUiMeta()
         };
       }
       if (waitForLoginInProgress) {
@@ -17853,7 +17862,7 @@ async function handleAuthTool(name, args) {
         while (Date.now() - startTime2 < timeoutMs) {
           if (isSessionValid()) {
             const session = getSession();
-            const user = session?.loginName || session?.email || "\u5DF2\u767B\u5F55";
+            const user = (session && "loginName" in session ? String(session.loginName) : session?.email) || "\u5DF2\u767B\u5F55";
             return {
               content: [{
                 type: "text",
@@ -17861,7 +17870,8 @@ async function handleAuthTool(name, args) {
                   `\u2705 \u767B\u5F55\u6210\u529F\uFF0C\u7EE7\u7EED\u6267\u884C\u540E\u7EED\u4EFB\u52A1 / Login successful, proceeding`,
                   `\u7528\u6237 / User: ${user}`
                 ].join("\n")
-              }]
+              }],
+              _meta: buildLoginUiMeta()
             };
           }
           await new Promise((resolve3) => setTimeout(resolve3, pollIntervalMs));
@@ -20332,12 +20342,21 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
         return await callApi(ENDPOINTS.shopping.mergeOrderAutoProgress, {
           taskId: args.taskId
         }, "read");
-      case "get_pay_order_list":
-        return await callApi(ENDPOINTS.shopping.listOrder, {
-          pageNum: args.pageNum || 1,
-          pageSize: Math.min(args.pageSize || 20, 50),
-          status: "UNPAID"
-        }, "read");
+      case "get_pay_order_list": {
+        const response = await httpClient.request(ENDPOINTS.shopping.listOrder, {
+          method: "GET",
+          params: {
+            pageNum: String(args.pageNum || 1),
+            pageSize: String(Math.min(args.pageSize || 20, 50)),
+            status: "UNPAID"
+          },
+          tier: "read"
+        });
+        if (!isApiSuccess(response)) {
+          return { content: [{ type: "text", text: `\u8BF7\u6C42\u5931\u8D25 / Request failed: ${response.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(response.data, null, 2) }] };
+      }
       case "get_order_list": {
         const env = getEnvConfig();
         const urlParams = new URLSearchParams();

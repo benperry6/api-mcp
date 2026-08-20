@@ -46,6 +46,19 @@ export function setTokenGetter(fn: () => string | null): void {
   tokenGetter = fn;
 }
 
+/**
+ * CJ exposes two accepted auth header shapes:
+ * - OpenAPI tokens obtained from apiKey → `CJ-Access-Token`
+ * - Local MCP/web login tokens (`MCP@...` / `USR@...`) → `token`
+ *
+ * The local-mode CJ MCP docs say email+password login is sufficient; live probes
+ * against `product/globalWarehouseList` confirm those MCP tokens are rejected in
+ * `CJ-Access-Token` but accepted in `token`.
+ */
+export function getAuthHeaderName(token: string): 'CJ-Access-Token' | 'token' {
+  return /^(MCP|USR)@/.test(token) ? 'token' : 'CJ-Access-Token';
+}
+
 export class HttpClient {
   private baseUrl: string;
 
@@ -84,7 +97,7 @@ export class HttpClient {
         if (!skipAuth && tokenGetter) {
           const token = tokenGetter();
           if (token) {
-            headers['CJ-Access-Token'] = token;
+            headers[getAuthHeaderName(token)] = token;
           }
         }
 

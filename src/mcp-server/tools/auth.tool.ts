@@ -176,7 +176,7 @@ export function getAuthTools(): Tool[] {
     // 只有 wait_for_login / show_login_form 需要 _meta.ui（展示登录 UI）
     // check_login_status / logout / get_rate_limit_status / verify_credentials 永远不注入
     // 否则 Cursor 在 tools/list 时就会渲染登录 UI，即使已登录也会弹出
-    if (!valid && (tool.name === 'show_login_form')) {
+    if (!valid && (tool.name === 'wait_for_login' || tool.name === 'show_login_form')) {
       const uniqueUri = `${AUTH_LOGIN_UI_BASE}?t=${Date.now()}_${++loginUriSeq}`;
       return {
         ...tool,
@@ -300,7 +300,7 @@ export async function handleAuthTool(
 
       if (isSessionValid()) {
         const session = getSession();
-        const user = session?.loginName || session?.email || '已登录';
+        const user = (session && 'loginName' in session ? String((session as Record<string, unknown>).loginName) : session?.email) || '已登录';
         return {
           content: [{
             type: 'text',
@@ -309,6 +309,7 @@ export async function handleAuthTool(
               `用户 / User: ${user}`,
             ].join('\n'),
           }],
+          _meta: buildLoginUiMeta(),
         };
       }
 
@@ -325,6 +326,7 @@ export async function handleAuthTool(
               'After login, let me know and I will call check_login_status to confirm.',
             ].join('\n'),
           }],
+          _meta: buildLoginUiMeta(),
         };
       }
 
@@ -350,7 +352,7 @@ export async function handleAuthTool(
         while (Date.now() - startTime < timeoutMs) {
           if (isSessionValid()) {
             const session = getSession();
-            const user = session?.loginName || session?.email || '已登录';
+            const user = (session && 'loginName' in session ? String((session as Record<string, unknown>).loginName) : session?.email) || '已登录';
             return {
               content: [{
                 type: 'text',
@@ -359,6 +361,7 @@ export async function handleAuthTool(
                   `用户 / User: ${user}`,
                 ].join('\n'),
               }],
+              _meta: buildLoginUiMeta(),
             };
           }
           await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
@@ -641,11 +644,11 @@ async function handleVerifyCredentials(
 
     /**
      * @description 登录响应处理
-     * @note 重要区分: 登录接口返回的 accessToken/token 是 CJ 前端 JWT (格式: USR@CJxxx@L5@CJ:...)
-     * 这个 token 不能用于 OpenAPI 调用！
-     * OpenAPI 需要单独的 apiKey (用户在后台生成) → 再通过 getAccessToken 接口换取 OpenAPI accessToken
-     * 后续会有新接口开发来替代当前的 apiKey 获取方式
-     * 返回字段: data.token (CJ前端JWT), data.accessToken (同token), data.expireTime,
+     * @note 重要区分: email/password 本地 MCP 登录会返回 CJ 前端/MCP token
+     * (常见格式: MCP@CJxxx@L5@CJ:... 或 USR@CJxxx@L5@CJ:...)。
+     * 这类 token 不是 apiKey 换来的 OpenAPI accessToken，调用 CJ API 时必须放在
+     * `token` header 中；apiKey 换来的 OpenAPI token 才使用 `CJ-Access-Token`。
+     * 返回字段: data.token, data.accessToken, data.expireTime,
      *           data.extra.email, data.num, data.id
      */
     const apiKey = loginData.data?.apiKey;
@@ -677,9 +680,9 @@ async function handleVerifyCredentials(
 
     if (!apiKey) {
       /**
-       * @description 无 apiKey 时使用登录返回的 token 作为 OpenAPI accessToken
-       * @note 纠正: email+password 登录返回的 token 字段可直接用于 OpenAPI 接口调用
-       * 不需要额外的 apiKey → getAccessToken 流程
+       * @description 无 apiKey 时使用登录返回的 MCP/web token，并由 http-client 使用 `token` header。
+       * @note 本地 MCP email+password 模式不需要 apiKey；现场验证显示此 token 放在
+       * `token` header 可调用 product/globalWarehouseList、product/listV2、shop/getShops。
        */
       if (loginToken) {
         const session = setSessionDirect({

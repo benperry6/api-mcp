@@ -811,12 +811,23 @@ export async function handleOrderTool(
         /**
          * @note 纠正(16次): /shopping/directOrder/getPayOrderListV3 不存在于API文档。
          * 改用 /shopping/order/list 并默认传 status=UNPAID 以过滤待支付订单。
+         * This endpoint accepts GET only; filters belong in the query string.
          */
-        return await callApi(ENDPOINTS.shopping.listOrder, {
-          pageNum: (args.pageNum as number) || 1,
-          pageSize: Math.min((args.pageSize as number) || 20, 50),
-          status: 'UNPAID',
-        }, 'read');
+        {
+          const response = await httpClient.request(ENDPOINTS.shopping.listOrder, {
+            method: 'GET',
+            params: {
+              pageNum: String((args.pageNum as number) || 1),
+              pageSize: String(Math.min((args.pageSize as number) || 20, 50)),
+              status: 'UNPAID',
+            },
+            tier: 'read',
+          });
+          if (!isApiSuccess(response)) {
+            return { content: [{ type: 'text', text: `请求失败 / Request failed: ${response.message}` }], isError: true };
+          }
+          return { content: [{ type: 'text', text: JSON.stringify(response.data, null, 2) }] };
+        }
 
       case 'get_order_list': {
         /**
