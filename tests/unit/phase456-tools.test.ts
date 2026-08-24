@@ -73,8 +73,8 @@ import { webhookTools } from '../../src/mcp-server/tools/webhook.tool';
 describe('order.tool', () => {
   beforeEach(() => mockRequest.mockClear());
 
-  it('注册了20个tools', () => {
-    expect(orderTools).toHaveLength(20);
+  it('注册了22个tools', () => {
+    expect(orderTools).toHaveLength(22);
     expect(orderTools.map(t => t.name)).toContain('add_to_cart');
     expect(orderTools.map(t => t.name)).toContain('create_order');
     expect(orderTools.map(t => t.name)).toContain('submit_order_to_cart');
