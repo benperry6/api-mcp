@@ -578,6 +578,168 @@ export function getOrderTools(): Tool[] {
 /** 工具返回类型：支持 text/resource content + _meta + structuredContent */
 type OrderToolResult = { content: Array<Record<string, unknown>>; isError?: boolean; structuredContent?: Record<string, unknown>; _meta?: Record<string, unknown> };
 
+type ChildFinancialReceipt = {
+  ioss_amount: string;
+  ioss_tax_handling_fee: string;
+  product_amount: string;
+  postage_amount: string;
+  actual_payment: string;
+  currency: 'USD';
+};
+
+type CanonicalPaymentReceipt = {
+  product: string;
+  freight: string;
+  tax_ioss: string;
+  handling_other: string;
+  discount: string;
+  total: string;
+  currency: 'USD';
+  parent_code: string;
+  child_codes: string[];
+  shipment_id: string;
+  payment_reference: string;
+  pay_id: string;
+  hosted_url: string;
+  child_financial_receipt?: ChildFinancialReceipt;
+};
+
+function parseUsdCents(value: unknown, field: string): bigint {
+  if (typeof value !== 'string' && typeof value !== 'number') {
+    throw new Error(`Invalid payment receipt: ${field} must be a USD decimal`);
+  }
+  const decimal = String(value);
+  const match = /^(0|[1-9]\d*)(?:\.(\d{1,2}))?$/.exec(decimal);
+  if (!match) {
+    throw new Error(`Invalid payment receipt: ${field} must be a non-negative USD decimal with at most 2 places`);
+  }
+  return BigInt(match[1]) * 100n + BigInt((match[2] ?? '').padEnd(2, '0'));
+}
+
+function formatUsdCents(value: bigint): string {
+  const whole = value / 100n;
+  const fraction = String(value % 100n).padStart(2, '0');
+  return `${whole}.${fraction}`;
+}
+
+function hasOwn(data: Record<string, unknown>, field: string): boolean {
+  return Object.prototype.hasOwnProperty.call(data, field);
+}
+
+function exactReceiptId(value: unknown, field: string): string {
+  if (typeof value !== 'string' || value.length === 0 || value.trim() !== value) {
+    throw new Error(`Invalid payment receipt: ${field} must be an exact non-empty string`);
+  }
+  return value;
+}
+
+function buildChildFinancialReceipt(
+  createOrderData: Record<string, unknown>,
+  payType: unknown
+): ChildFinancialReceipt | undefined {
+  if (payType !== 3) return undefined;
+
+  const fields = ['iossAmount', 'iossTaxHandlingFee', 'productAmount', 'postageAmount', 'actualPayment'] as const;
+  const available = fields.filter(field => {
+    const value = createOrderData[field];
+    return value !== undefined && value !== null && value !== '';
+  });
+  if (available.length === 0) return undefined;
+  if (available.length !== fields.length) {
+    throw new Error('Invalid child financial receipt: all documented payType-3 amounts must be present together');
+  }
+
+  return {
+    ioss_amount: formatUsdCents(parseUsdCents(createOrderData.iossAmount, 'createOrderV2.iossAmount')),
+    ioss_tax_handling_fee: formatUsdCents(parseUsdCents(createOrderData.iossTaxHandlingFee, 'createOrderV2.iossTaxHandlingFee')),
+    product_amount: formatUsdCents(parseUsdCents(createOrderData.productAmount, 'createOrderV2.productAmount')),
+    postage_amount: formatUsdCents(parseUsdCents(createOrderData.postageAmount, 'createOrderV2.postageAmount')),
+    actual_payment: formatUsdCents(parseUsdCents(createOrderData.actualPayment, 'createOrderV2.actualPayment')),
+    currency: 'USD',
+  };
+}
+
+function buildCanonicalPaymentReceipt(
+  parentData: Record<string, unknown>,
+  shipmentId: string,
+  webBase: string,
+  childFinancialReceipt?: ChildFinancialReceipt
+): CanonicalPaymentReceipt {
+  const paymentInformation = parentData.paymentInformation;
+  if (!paymentInformation || typeof paymentInformation !== 'object' || Array.isArray(paymentInformation)) {
+    throw new Error('Invalid payment receipt: paymentInformation is missing or malformed');
+  }
+  const finance = paymentInformation as Record<string, unknown>;
+
+  const hasOrderProduct = hasOwn(finance, 'orderProductAmount');
+  const hasCommodityTotal = hasOwn(finance, 'commodityTotalAmount');
+  if (!hasOrderProduct && !hasCommodityTotal) {
+    throw new Error('Invalid payment receipt: orderProductAmount or commodityTotalAmount is required');
+  }
+  const orderProduct = hasOrderProduct
+    ? parseUsdCents(finance.orderProductAmount, 'orderProductAmount')
+    : undefined;
+  const commodityTotal = hasCommodityTotal
+    ? parseUsdCents(finance.commodityTotalAmount, 'commodityTotalAmount')
+    : undefined;
+  if (orderProduct !== undefined && commodityTotal !== undefined && orderProduct !== commodityTotal) {
+    throw new Error('Invalid payment receipt: orderProductAmount and commodityTotalAmount disagree');
+  }
+  const product = orderProduct ?? commodityTotal!;
+  const freight = parseUsdCents(finance.freight, 'freight');
+  const taxIoss = parseUsdCents(finance.iossTaxes, 'iossTaxes');
+  const iossHandling = parseUsdCents(finance.iossTaxHandlingFee, 'iossTaxHandlingFee');
+  const serviceFee = parseUsdCents(finance.serviceFee, 'serviceFee');
+  const total = parseUsdCents(finance.actualPayment, 'actualPayment');
+
+  if (hasOwn(finance, 'iossAmount')) {
+    const iossAmount = parseUsdCents(finance.iossAmount, 'iossAmount');
+    if (iossAmount !== taxIoss + iossHandling) {
+      throw new Error('Invalid payment receipt: iossAmount does not equal iossTaxes + iossTaxHandlingFee');
+    }
+  }
+
+  const handlingOther = iossHandling + serviceFee;
+  const gross = product + freight + taxIoss + handlingOther;
+  const discount = gross - total;
+  if (discount < 0n) {
+    throw new Error('Invalid payment receipt: authoritative components do not reconcile with actualPayment');
+  }
+
+  const payId = exactReceiptId(parentData.payId, 'payId');
+  const childOrders = parentData.successOrders;
+  if (!Array.isArray(childOrders) || childOrders.length === 0) {
+    throw new Error('Invalid payment receipt: successOrders must contain at least one child order code');
+  }
+  const childCodes = childOrders.map((code, index) => exactReceiptId(code, `successOrders[${index}]`));
+  if (new Set(childCodes).size !== childCodes.length) {
+    throw new Error('Invalid payment receipt: successOrders contains duplicate child order codes');
+  }
+  const exactShipmentId = exactReceiptId(shipmentId, 'shipmentId');
+  const hostedUrl = `${webBase}/mine/payment?pid=${encodeURIComponent(payId)}`;
+
+  return {
+    product: formatUsdCents(product),
+    freight: formatUsdCents(freight),
+    tax_ioss: formatUsdCents(taxIoss),
+    handling_other: formatUsdCents(handlingOther),
+    discount: formatUsdCents(discount),
+    total: formatUsdCents(total),
+    currency: 'USD',
+    parent_code: exactShipmentId,
+    child_codes: childCodes,
+    shipment_id: exactShipmentId,
+    payment_reference: exactShipmentId,
+    pay_id: payId,
+    hosted_url: hostedUrl,
+    ...(childFinancialReceipt ? { child_financial_receipt: childFinancialReceipt } : {}),
+  };
+}
+
+function paymentReceiptText(receipt: CanonicalPaymentReceipt): string {
+  return `PAYMENT_RECEIPT_JSON: ${JSON.stringify(receipt)}`;
+}
+
 export async function handleOrderTool(
   name: string,
   args: Record<string, unknown>
@@ -733,9 +895,14 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [Step4/saveGenerateParentOrder] 失败 / Failed: ${parentOrderResp.message}\n订单已创建 orderId: ${createdOrderId}, shipmentsId: ${shipmentsId}` }], isError: true };
         }
         const parentData = parentOrderResp.data as Record<string, unknown>;
-        const payId = String(parentData?.payId ?? '');
         const webBase = getEnvConfig().webBase;
-        const payUrl = payId ? `${webBase}/mine/payment?pid=${payId}` : '';
+        const childFinancialReceipt = buildChildFinancialReceipt(orderData, rawInfo.payType);
+        const paymentReceipt = buildCanonicalPaymentReceipt(
+          parentData,
+          shipmentsId,
+          webBase,
+          childFinancialReceipt
+        );
 
         return {
           content: [{
@@ -744,9 +911,11 @@ export async function handleOrderTool(
               `✅ 订单创建并提交成功！/ Order created and submitted!`,
               `订单ID / Order ID: ${createdOrderId}`,
               `Shipment ID: ${shipmentsId}`,
-              payUrl ? `💳 支付链接 / Payment URL: ${payUrl}` : '⚠️ payId 为空，请前往 CJ 后台查看支付',
+              `💳 支付链接 / Payment URL: ${paymentReceipt.hosted_url}`,
+              paymentReceiptText(paymentReceipt),
             ].join('\n'),
           }],
+          structuredContent: { payment_receipt: paymentReceipt },
         };
       }
 
@@ -788,9 +957,12 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [saveGenerateParentOrder] 失败 / Failed: ${sotcParentResp.message}\norderId: ${sotcOrderId}, shipmentsId: ${sotcShipmentsId}` }], isError: true };
         }
         const sotcParentData = sotcParentResp.data as Record<string, unknown>;
-        const sotcPayId = String(sotcParentData?.payId ?? '');
         const sotcWebBase = getEnvConfig().webBase;
-        const sotcPayUrl = sotcPayId ? `${sotcWebBase}/mine/payment?pid=${sotcPayId}` : '';
+        const sotcPaymentReceipt = buildCanonicalPaymentReceipt(
+          sotcParentData,
+          sotcShipmentsId,
+          sotcWebBase
+        );
         return {
           content: [{
             type: 'text',
@@ -798,9 +970,11 @@ export async function handleOrderTool(
               `✅ 购物车提交成功！/ Cart submitted!`,
               `订单ID / Order ID: ${sotcOrderId}`,
               `Shipment ID: ${sotcShipmentsId}`,
-              sotcPayUrl ? `💳 支付链接 / Payment URL: ${sotcPayUrl}` : '⚠️ payId 为空，请前往 CJ 后台查看支付',
+              `💳 支付链接 / Payment URL: ${sotcPaymentReceipt.hosted_url}`,
+              paymentReceiptText(sotcPaymentReceipt),
             ].join('\n'),
           }],
+          structuredContent: { payment_receipt: sotcPaymentReceipt },
         };
       }
 
@@ -832,9 +1006,12 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [saveGenerateParentOrder] 失败 / Failed: ${ccpParentResp.message}\norderId: ${ccpOrderId}, shipmentsId: ${ccpShipmentsId}` }], isError: true };
         }
         const ccpParentData = ccpParentResp.data as Record<string, unknown>;
-        const ccpPayId = String(ccpParentData?.payId ?? '');
         const ccpWebBase = getEnvConfig().webBase;
-        const ccpPayUrl = ccpPayId ? `${ccpWebBase}/mine/payment?pid=${ccpPayId}` : '';
+        const ccpPaymentReceipt = buildCanonicalPaymentReceipt(
+          ccpParentData,
+          ccpShipmentsId,
+          ccpWebBase
+        );
         return {
           content: [{
             type: 'text',
@@ -842,9 +1019,11 @@ export async function handleOrderTool(
               `✅ 购物车已确认并生成支付单！/ Cart confirmed!`,
               `订单ID / Order ID: ${ccpOrderId}`,
               `Shipment ID: ${ccpShipmentsId}`,
-              ccpPayUrl ? `💳 支付链接 / Payment URL: ${ccpPayUrl}` : '⚠️ payId 为空，请前往 CJ 后台查看支付',
+              `💳 支付链接 / Payment URL: ${ccpPaymentReceipt.hosted_url}`,
+              paymentReceiptText(ccpPaymentReceipt),
             ].join('\n'),
           }],
+          structuredContent: { payment_receipt: ccpPaymentReceipt },
         };
       }
 
@@ -863,18 +1042,23 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [saveGenerateParentOrder] 失败 / Failed: ${gplParentResp.message}\nshipmentsId: ${gplShipmentsId}` }], isError: true };
         }
         const gplData = gplParentResp.data as Record<string, unknown>;
-        const gplPayId = String(gplData?.payId ?? '');
         const gplWebBase = getEnvConfig().webBase;
-        const gplPayUrl = gplPayId ? `${gplWebBase}/mine/payment?pid=${gplPayId}` : '';
+        const gplPaymentReceipt = buildCanonicalPaymentReceipt(
+          gplData,
+          gplShipmentsId,
+          gplWebBase
+        );
         return {
           content: [{
             type: 'text',
             text: [
               `✅ 支付单生成成功！/ Payment order generated!`,
               `Shipment ID: ${gplShipmentsId}`,
-              gplPayUrl ? `💳 支付链接 / Payment URL: ${gplPayUrl}` : '⚠️ payId 为空，请前往 CJ 后台查看支付',
+              `💳 支付链接 / Payment URL: ${gplPaymentReceipt.hosted_url}`,
+              paymentReceiptText(gplPaymentReceipt),
             ].join('\n'),
           }],
+          structuredContent: { payment_receipt: gplPaymentReceipt },
         };
       }
 
