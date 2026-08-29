@@ -676,16 +676,9 @@ function buildCanonicalPaymentReceipt(
   if (!hasOrderProduct && !hasCommodityTotal) {
     throw new Error('Invalid payment receipt: orderProductAmount or commodityTotalAmount is required');
   }
-  const orderProduct = hasOrderProduct
-    ? parseUsdCents(finance.orderProductAmount, 'orderProductAmount')
-    : undefined;
-  const commodityTotal = hasCommodityTotal
+  const product = hasCommodityTotal
     ? parseUsdCents(finance.commodityTotalAmount, 'commodityTotalAmount')
-    : undefined;
-  if (orderProduct !== undefined && commodityTotal !== undefined && orderProduct !== commodityTotal) {
-    throw new Error('Invalid payment receipt: orderProductAmount and commodityTotalAmount disagree');
-  }
-  const product = orderProduct ?? commodityTotal!;
+    : parseUsdCents(finance.orderProductAmount, 'orderProductAmount');
   const freight = parseUsdCents(finance.freight, 'freight');
   const taxIoss = parseUsdCents(finance.iossTaxes, 'iossTaxes');
   const iossHandling = parseUsdCents(finance.iossTaxHandlingFee, 'iossTaxHandlingFee');

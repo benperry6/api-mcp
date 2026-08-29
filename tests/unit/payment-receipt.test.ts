@@ -219,12 +219,12 @@ describe('canonical order payment receipts', () => {
     });
   });
 
-  it('rejects conflicting product aliases', async () => {
+  it('uses commodityTotalAmount when both product amounts are present and disagree', async () => {
     mockRequest.mockResolvedValueOnce(apiSuccess(parentFinance({
       paymentInformation: {
         actualPayment: '13.20',
-        orderProductAmount: '10.10',
-        commodityTotalAmount: '10.11',
+        orderProductAmount: '99.99',
+        commodityTotalAmount: '10.10',
         freight: '2.20',
         iossTaxes: '1.10',
         iossTaxHandlingFee: '0.30',
@@ -235,8 +235,29 @@ describe('canonical order payment receipts', () => {
 
     const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
 
+    expectCanonicalReceipt(result);
+  });
+
+  it('falls back to orderProductAmount when commodityTotalAmount is absent', async () => {
+    const fallbackFinance = parentFinance();
+    delete (fallbackFinance.paymentInformation as Record<string, unknown>).commodityTotalAmount;
+    mockRequest.mockResolvedValueOnce(apiSuccess(fallbackFinance));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expectCanonicalReceipt(result);
+  });
+
+  it('rejects invalid commodityTotalAmount without falling back to orderProductAmount', async () => {
+    const invalidCommodity = parentFinance();
+    (invalidCommodity.paymentInformation as Record<string, unknown>).commodityTotalAmount = 'invalid';
+    mockRequest.mockResolvedValueOnce(apiSuccess(invalidCommodity));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('orderProductAmount');
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain('commodityTotalAmount');
   });
 
   it('cross-checks iossAmount only as tax plus IOSS handling', async () => {
