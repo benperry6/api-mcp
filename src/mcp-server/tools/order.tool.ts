@@ -671,14 +671,10 @@ function buildCanonicalPaymentReceipt(
   }
   const finance = paymentInformation as Record<string, unknown>;
 
-  const hasOrderProduct = hasOwn(finance, 'orderProductAmount');
-  const hasCommodityTotal = hasOwn(finance, 'commodityTotalAmount');
-  if (!hasOrderProduct && !hasCommodityTotal) {
-    throw new Error('Invalid payment receipt: orderProductAmount or commodityTotalAmount is required');
+  if (!hasOwn(finance, 'orderProductAmount')) {
+    throw new Error('Invalid payment receipt: orderProductAmount is required');
   }
-  const product = hasCommodityTotal
-    ? parseUsdCents(finance.commodityTotalAmount, 'commodityTotalAmount')
-    : parseUsdCents(finance.orderProductAmount, 'orderProductAmount');
+  const product = parseUsdCents(finance.orderProductAmount, 'orderProductAmount');
   const freight = parseUsdCents(finance.freight, 'freight');
   const taxIoss = parseUsdCents(finance.iossTaxes, 'iossTaxes');
   const iossHandling = parseUsdCents(finance.iossTaxHandlingFee, 'iossTaxHandlingFee');
@@ -1036,7 +1032,7 @@ export async function handleOrderTool(
         }
         let gplData = gplParentResp.data as Record<string, unknown>;
         const gplSuccessOrders = gplData.successOrders;
-        if (gplSuccessOrders === undefined || (Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0)) {
+        if (gplSuccessOrders == null || (Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0)) {
           let gplDetailResp;
           try {
             gplDetailResp = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {

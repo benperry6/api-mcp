@@ -20170,12 +20170,10 @@ function buildCanonicalPaymentReceipt(parentData, shipmentId, webBase, childFina
     throw new Error("Invalid payment receipt: paymentInformation is missing or malformed");
   }
   const finance = paymentInformation;
-  const hasOrderProduct = hasOwn(finance, "orderProductAmount");
-  const hasCommodityTotal = hasOwn(finance, "commodityTotalAmount");
-  if (!hasOrderProduct && !hasCommodityTotal) {
-    throw new Error("Invalid payment receipt: orderProductAmount or commodityTotalAmount is required");
+  if (!hasOwn(finance, "orderProductAmount")) {
+    throw new Error("Invalid payment receipt: orderProductAmount is required");
   }
-  const product = hasCommodityTotal ? parseUsdCents(finance.commodityTotalAmount, "commodityTotalAmount") : parseUsdCents(finance.orderProductAmount, "orderProductAmount");
+  const product = parseUsdCents(finance.orderProductAmount, "orderProductAmount");
   const freight = parseUsdCents(finance.freight, "freight");
   const taxIoss = parseUsdCents(finance.iossTaxes, "iossTaxes");
   const iossHandling = parseUsdCents(finance.iossTaxHandlingFee, "iossTaxHandlingFee");
@@ -20515,7 +20513,7 @@ shipmentsId: ${gplShipmentsId}` }], isError: true };
         }
         let gplData = gplParentResp.data;
         const gplSuccessOrders = gplData.successOrders;
-        if (gplSuccessOrders === void 0 || Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0) {
+        if (gplSuccessOrders == null || Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0) {
           let gplDetailResp;
           try {
             gplDetailResp = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {

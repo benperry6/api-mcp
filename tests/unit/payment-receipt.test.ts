@@ -100,6 +100,7 @@ describe('canonical order payment receipts', () => {
   it.each([
     ['missing', undefined],
     ['empty', []],
+    ['null', null],
   ])('recovers %s successOrders from the exact unpaid parent detail', async (_label, successOrders) => {
     const finance: Record<string, unknown> = parentFinance({ successOrders });
     if (successOrders === undefined) delete finance.successOrders;
@@ -311,12 +312,12 @@ describe('canonical order payment receipts', () => {
     });
   });
 
-  it('uses commodityTotalAmount when both product amounts are present and disagree', async () => {
+  it('uses orderProductAmount when commodityTotalAmount represents the payable total', async () => {
     mockRequest.mockResolvedValueOnce(apiSuccess(parentFinance({
       paymentInformation: {
         actualPayment: '13.20',
-        orderProductAmount: '99.99',
-        commodityTotalAmount: '10.10',
+        orderProductAmount: '10.10',
+        commodityTotalAmount: '13.20',
         freight: '2.20',
         iossTaxes: '1.10',
         iossTaxHandlingFee: '0.30',
@@ -330,7 +331,7 @@ describe('canonical order payment receipts', () => {
     expectCanonicalReceipt(result);
   });
 
-  it('falls back to orderProductAmount when commodityTotalAmount is absent', async () => {
+  it('accepts orderProductAmount when commodityTotalAmount is absent', async () => {
     const fallbackFinance = parentFinance();
     delete (fallbackFinance.paymentInformation as Record<string, unknown>).commodityTotalAmount;
     mockRequest.mockResolvedValueOnce(apiSuccess(fallbackFinance));
@@ -340,16 +341,26 @@ describe('canonical order payment receipts', () => {
     expectCanonicalReceipt(result);
   });
 
-  it('rejects invalid commodityTotalAmount without falling back to orderProductAmount', async () => {
+  it('does not reinterpret commodityTotalAmount as the product amount', async () => {
     const invalidCommodity = parentFinance();
     (invalidCommodity.paymentInformation as Record<string, unknown>).commodityTotalAmount = 'invalid';
     mockRequest.mockResolvedValueOnce(apiSuccess(invalidCommodity));
 
     const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
 
+    expectCanonicalReceipt(result);
+  });
+
+  it('fails closed when orderProductAmount is absent', async () => {
+    const missingProduct = parentFinance();
+    delete (missingProduct.paymentInformation as Record<string, unknown>).orderProductAmount;
+    mockRequest.mockResolvedValueOnce(apiSuccess(missingProduct));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
-    expect(result.content[0].text).toContain('commodityTotalAmount');
+    expect(result.content[0].text).toContain('orderProductAmount');
   });
 
   it('cross-checks iossAmount only as tax plus IOSS handling', async () => {
