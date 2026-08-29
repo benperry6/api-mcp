@@ -20170,17 +20170,10 @@ function buildCanonicalPaymentReceipt(parentData, shipmentId, webBase, childFina
     throw new Error("Invalid payment receipt: paymentInformation is missing or malformed");
   }
   const finance = paymentInformation;
-  const hasOrderProduct = hasOwn(finance, "orderProductAmount");
-  const hasCommodityTotal = hasOwn(finance, "commodityTotalAmount");
-  if (!hasOrderProduct && !hasCommodityTotal) {
-    throw new Error("Invalid payment receipt: orderProductAmount or commodityTotalAmount is required");
+  if (!hasOwn(finance, "orderProductAmount")) {
+    throw new Error("Invalid payment receipt: orderProductAmount is required");
   }
-  const orderProduct = hasOrderProduct ? parseUsdCents(finance.orderProductAmount, "orderProductAmount") : void 0;
-  const commodityTotal = hasCommodityTotal ? parseUsdCents(finance.commodityTotalAmount, "commodityTotalAmount") : void 0;
-  if (orderProduct !== void 0 && commodityTotal !== void 0 && orderProduct !== commodityTotal) {
-    throw new Error("Invalid payment receipt: orderProductAmount and commodityTotalAmount disagree");
-  }
-  const product = orderProduct ?? commodityTotal;
+  const product = parseUsdCents(finance.orderProductAmount, "orderProductAmount");
   const freight = parseUsdCents(finance.freight, "freight");
   const taxIoss = parseUsdCents(finance.iossTaxes, "iossTaxes");
   const iossHandling = parseUsdCents(finance.iossTaxHandlingFee, "iossTaxHandlingFee");
@@ -20518,7 +20511,40 @@ orderId: ${ccpOrderId}, shipmentsId: ${ccpShipmentsId}` }], isError: true };
           return { content: [{ type: "text", text: `\u274C [saveGenerateParentOrder] \u5931\u8D25 / Failed: ${gplParentResp.message}
 shipmentsId: ${gplShipmentsId}` }], isError: true };
         }
-        const gplData = gplParentResp.data;
+        let gplData = gplParentResp.data;
+        const gplSuccessOrders = gplData.successOrders;
+        if (gplSuccessOrders == null || Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0) {
+          let gplDetailResp;
+          try {
+            gplDetailResp = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {
+              method: "GET",
+              params: { orderId: gplShipmentsId },
+              tier: "read"
+            });
+          } catch (error2) {
+            const reason = error2 instanceof Error ? error2.message : String(error2);
+            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${reason}`);
+          }
+          if (!isApiSuccess(gplDetailResp)) {
+            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${gplDetailResp.message}`);
+          }
+          const gplDetail = gplDetailResp.data;
+          if (!gplDetail || typeof gplDetail !== "object" || Array.isArray(gplDetail)) {
+            throw new Error("Payment receipt recovery failed: getOrderDetail data must be an object");
+          }
+          const gplDetailData = gplDetail;
+          if (gplDetailData.orderStatus !== "UNPAID") {
+            throw new Error("Payment receipt recovery failed: orderStatus must be exactly UNPAID");
+          }
+          if (gplDetailData.cjOrderId !== gplShipmentsId) {
+            throw new Error("Payment receipt recovery failed: cjOrderId must exactly match shipmentsId");
+          }
+          const gplChildCode = gplDetailData.cjOrderCode;
+          if (typeof gplChildCode !== "string" || !/^(?:DP|SD)[A-Za-z0-9]+$/.test(gplChildCode)) {
+            throw new Error("Payment receipt recovery failed: cjOrderCode must be one exact non-empty identifier starting with DP or SD");
+          }
+          gplData = { ...gplData, successOrders: [gplChildCode] };
+        }
         const gplWebBase = getEnvConfig().webBase;
         const gplPaymentReceipt = buildCanonicalPaymentReceipt(
           gplData,

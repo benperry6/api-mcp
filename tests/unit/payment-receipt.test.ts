@@ -94,6 +94,99 @@ describe('canonical order payment receipts', () => {
 
     expectCanonicalReceipt(result);
     expect(result.content[0].text).toContain(expectedReceipt.hosted_url);
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', []],
+    ['null', null],
+  ])('recovers %s successOrders from the exact unpaid parent detail', async (_label, successOrders) => {
+    const finance: Record<string, unknown> = parentFinance({ successOrders });
+    if (successOrders === undefined) delete finance.successOrders;
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(finance))
+      .mockResolvedValueOnce(apiSuccess({
+        orderStatus: 'UNPAID',
+        cjOrderId: 'CJ-SHIP-1',
+        cjOrderCode: 'DP2608251211540655100',
+      }));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      child_codes: ['DP2608251211540655100'],
+    });
+    expect(mockRequest).toHaveBeenNthCalledWith(2, '/shopping/order/getOrderDetail', {
+      method: 'GET',
+      params: { orderId: 'CJ-SHIP-1' },
+      tier: 'read',
+    });
+  });
+
+  it('fails closed when the parent detail read returns an API failure', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })))
+      .mockResolvedValueOnce({ code: 500, result: false, message: 'detail unavailable' });
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain('getOrderDetail');
+    expect(result.content[0].text).toContain('detail unavailable');
+  });
+
+  it('fails closed when the parent detail read throws', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })))
+      .mockRejectedValueOnce(new Error('network unavailable'));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain('getOrderDetail read failed');
+    expect(result.content[0].text).toContain('network unavailable');
+  });
+
+  it.each([
+    ['not an object', null, 'object'],
+    ['an array', [{ orderStatus: 'UNPAID', cjOrderId: 'CJ-SHIP-1', cjOrderCode: 'DP1' }], 'object'],
+    ['not UNPAID', { orderStatus: 'PAID', cjOrderId: 'CJ-SHIP-1', cjOrderCode: 'DP1' }, 'UNPAID'],
+    ['a different parent', { orderStatus: 'UNPAID', cjOrderId: 'CJ-OTHER', cjOrderCode: 'DP1' }, 'cjOrderId'],
+    ['a missing child code', { orderStatus: 'UNPAID', cjOrderId: 'CJ-SHIP-1' }, 'cjOrderCode'],
+    ['an invalid child prefix', { orderStatus: 'UNPAID', cjOrderId: 'CJ-SHIP-1', cjOrderCode: 'CJ-CHILD-1' }, 'DP or SD'],
+    ['an ambiguous child code', { orderStatus: 'UNPAID', cjOrderId: 'CJ-SHIP-1', cjOrderCode: ['DP1', 'SD1'] }, 'cjOrderCode'],
+  ])('fails closed when the parent detail has %s', async (_label, detail, expectedError) => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })))
+      .mockResolvedValueOnce(apiSuccess(detail as Record<string, unknown>));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain(expectedError);
+  });
+
+  it('never substitutes orderNum, platformOrderId, or lineItemId for cjOrderCode', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })))
+      .mockResolvedValueOnce(apiSuccess({
+        orderStatus: 'UNPAID',
+        cjOrderId: 'CJ-SHIP-1',
+        orderNum: 'DP-ORDER-NUM',
+        platformOrderId: 'DP-PLATFORM',
+        lineItemId: 'SD-LINE-ITEM',
+      }));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain('cjOrderCode');
   });
 
   it('returns the same canonical receipt from confirm_cart_and_pay', async () => {
@@ -219,12 +312,12 @@ describe('canonical order payment receipts', () => {
     });
   });
 
-  it('rejects conflicting product aliases', async () => {
+  it('uses orderProductAmount when commodityTotalAmount represents the payable total', async () => {
     mockRequest.mockResolvedValueOnce(apiSuccess(parentFinance({
       paymentInformation: {
         actualPayment: '13.20',
         orderProductAmount: '10.10',
-        commodityTotalAmount: '10.11',
+        commodityTotalAmount: '13.20',
         freight: '2.20',
         iossTaxes: '1.10',
         iossTaxHandlingFee: '0.30',
@@ -235,7 +328,38 @@ describe('canonical order payment receipts', () => {
 
     const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
 
+    expectCanonicalReceipt(result);
+  });
+
+  it('accepts orderProductAmount when commodityTotalAmount is absent', async () => {
+    const fallbackFinance = parentFinance();
+    delete (fallbackFinance.paymentInformation as Record<string, unknown>).commodityTotalAmount;
+    mockRequest.mockResolvedValueOnce(apiSuccess(fallbackFinance));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expectCanonicalReceipt(result);
+  });
+
+  it('does not reinterpret commodityTotalAmount as the product amount', async () => {
+    const invalidCommodity = parentFinance();
+    (invalidCommodity.paymentInformation as Record<string, unknown>).commodityTotalAmount = 'invalid';
+    mockRequest.mockResolvedValueOnce(apiSuccess(invalidCommodity));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
+    expectCanonicalReceipt(result);
+  });
+
+  it('fails closed when orderProductAmount is absent', async () => {
+    const missingProduct = parentFinance();
+    delete (missingProduct.paymentInformation as Record<string, unknown>).orderProductAmount;
+    mockRequest.mockResolvedValueOnce(apiSuccess(missingProduct));
+
+    const result = await handleOrderTool('generate_payment_link', { shipmentsId: 'CJ-SHIP-1' });
+
     expect(result.isError).toBe(true);
+    expect(result.structuredContent).toBeUndefined();
     expect(result.content[0].text).toContain('orderProductAmount');
   });
 
