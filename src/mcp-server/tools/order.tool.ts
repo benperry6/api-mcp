@@ -1034,7 +1034,40 @@ export async function handleOrderTool(
         if (!isApiSuccess(gplParentResp)) {
           return { content: [{ type: 'text', text: `❌ [saveGenerateParentOrder] 失败 / Failed: ${gplParentResp.message}\nshipmentsId: ${gplShipmentsId}` }], isError: true };
         }
-        const gplData = gplParentResp.data as Record<string, unknown>;
+        let gplData = gplParentResp.data as Record<string, unknown>;
+        const gplSuccessOrders = gplData.successOrders;
+        if (gplSuccessOrders === undefined || (Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0)) {
+          let gplDetailResp;
+          try {
+            gplDetailResp = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {
+              method: 'GET',
+              params: { orderId: gplShipmentsId },
+              tier: 'read',
+            });
+          } catch (error: unknown) {
+            const reason = error instanceof Error ? error.message : String(error);
+            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${reason}`);
+          }
+          if (!isApiSuccess(gplDetailResp)) {
+            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${gplDetailResp.message}`);
+          }
+          const gplDetail = gplDetailResp.data;
+          if (!gplDetail || typeof gplDetail !== 'object' || Array.isArray(gplDetail)) {
+            throw new Error('Payment receipt recovery failed: getOrderDetail data must be an object');
+          }
+          const gplDetailData = gplDetail as Record<string, unknown>;
+          if (gplDetailData.orderStatus !== 'UNPAID') {
+            throw new Error('Payment receipt recovery failed: orderStatus must be exactly UNPAID');
+          }
+          if (gplDetailData.cjOrderId !== gplShipmentsId) {
+            throw new Error('Payment receipt recovery failed: cjOrderId must exactly match shipmentsId');
+          }
+          const gplChildCode = gplDetailData.cjOrderCode;
+          if (typeof gplChildCode !== 'string' || !/^(?:DP|SD)[A-Za-z0-9]+$/.test(gplChildCode)) {
+            throw new Error('Payment receipt recovery failed: cjOrderCode must be one exact non-empty identifier starting with DP or SD');
+          }
+          gplData = { ...gplData, successOrders: [gplChildCode] };
+        }
         const gplWebBase = getEnvConfig().webBase;
         const gplPaymentReceipt = buildCanonicalPaymentReceipt(
           gplData,
