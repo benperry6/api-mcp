@@ -708,6 +708,37 @@ async function readExactOrderState(orderId: string): Promise<ExactOrderState> {
   };
 }
 
+function unpaidOwnerShipmentId(state: ExactOrderState): string {
+  if (state.status !== 'UNPAID') {
+    throw new Error('Cart confirmation did not reach the exact UNPAID order state');
+  }
+  if (typeof state.ownerId !== 'string' || state.ownerId.trim() === '') {
+    throw new Error('Cart confirmation reached UNPAID without an exact parent shipment identifier');
+  }
+  return state.ownerId.trim();
+}
+
+async function waitForUnpaidOwnerShipment(
+  orderId: string,
+  attempts = 10,
+  delayMs = 1000
+): Promise<ExactOrderState> {
+  let lastState: ExactOrderState | undefined;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (attempt > 0) {
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+    lastState = await readExactOrderState(orderId);
+    if (lastState.status === 'UNPAID') {
+      unpaidOwnerShipmentId(lastState);
+      return lastState;
+    }
+  }
+  throw new Error(
+    `Cart confirmation did not become UNPAID after ${attempts} authoritative readbacks`
+  );
+}
+
 async function canonicalPaymentReceiptWithRecovery(
   parentData: Record<string, unknown>,
   shipmentId: string,
@@ -760,11 +791,20 @@ async function resolveShipmentId(
   const rawShipmentId = typeof confirmData.shipmentsId === 'string'
     ? confirmData.shipmentsId.trim()
     : '';
-  const state = await readExactOrderState(orderId);
+  const explicitFailure = confirmData.submitSuccess === false
+    || (typeof confirmData.result === 'number' && confirmData.result !== 0);
+  const state = rawShipmentId
+    ? await readExactOrderState(orderId)
+    : await waitForUnpaidOwnerShipment(orderId);
+  if (explicitFailure && state.status !== 'UNPAID') {
+    throw new Error('Cart confirmation was rejected and no exact UNPAID parent was created');
+  }
   return {
-    // CJ's documented successful addCartConfirm response may return an empty
-    // shipmentsId. saveGenerateParentOrder accepts the exact child DP/SD code.
-    shipmentId: rawShipmentId || state.childCode,
+    // CJ sometimes acknowledges the HTTP request while returning result=3 and
+    // submitSuccess=false. The only safe recovery is an authoritative UNPAID
+    // readback with the exact parent identifier; never send the child DP/SD
+    // code to saveGenerateParentOrder as a guessed shipment id.
+    shipmentId: rawShipmentId || unpaidOwnerShipmentId(state),
     childCode: state.childCode,
   };
 }
@@ -1026,7 +1066,9 @@ export async function handleOrderTool(
         }
         const sotcOrderId = String(args.orderId);
         const sotcInitialState = await readExactOrderState(sotcOrderId);
-        let sotcShipmentsId = sotcInitialState.childCode;
+        let sotcShipmentsId = sotcInitialState.status === 'UNPAID'
+          ? unpaidOwnerShipmentId(sotcInitialState)
+          : sotcInitialState.childCode;
         const sotcChildCode = sotcInitialState.childCode;
 
         // A retry after CJ has already created the unpaid parent must resume

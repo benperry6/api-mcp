@@ -405,26 +405,55 @@ describe('canonical order payment receipts', () => {
     expect(result.structuredContent?.payment_receipt).not.toHaveProperty('child_financial_receipt');
   });
 
-  it('uses the exact child code when successful addCartConfirm returns an empty shipmentsId', async () => {
+  it('uses the authoritative unpaid parent when addCartConfirm returns an empty shipmentsId', async () => {
     mockRequest
       .mockResolvedValueOnce(apiSuccess(childDetail()))
       .mockResolvedValueOnce(apiSuccess())
       .mockResolvedValueOnce(apiSuccess({ shipmentsId: '' }))
-      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(childDetail({
+        orderStatus: 'UNPAID',
+        cjOrderId: 'CJ26083055424283816937',
+      })))
       .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })));
 
     const result = await handleOrderTool('submit_order_to_cart', { orderId: 'DP2608301601170640100' });
 
     expectCanonicalReceipt(result, {
       ...expectedReceipt,
-      parent_code: 'DP2608301601170640100',
+      parent_code: 'CJ26083055424283816937',
       child_codes: ['DP2608301601170640100'],
-      shipment_id: 'DP2608301601170640100',
-      payment_reference: 'DP2608301601170640100',
+      shipment_id: 'CJ26083055424283816937',
+      payment_reference: 'CJ26083055424283816937',
     });
     expect(mockRequest).toHaveBeenNthCalledWith(5, '/shopping/order/saveGenerateParentOrder', {
-      body: { shipmentOrderId: 'DP2608301601170640100' },
+      body: { shipmentOrderId: 'CJ26083055424283816937' },
       tier: 'write',
+    });
+  });
+
+  it('recovers a result=3 confirmation only from an exact unpaid parent readback', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({
+        result: 3,
+        submitSuccess: false,
+        shipmentsId: null,
+      }))
+      .mockResolvedValueOnce(apiSuccess(childDetail({
+        orderStatus: 'UNPAID',
+        cjOrderId: 'CJ26083055424283816937',
+      })))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })));
+
+    const result = await handleOrderTool('submit_order_to_cart', { orderId: 'DP2608301601170640100' });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      parent_code: 'CJ26083055424283816937',
+      child_codes: ['DP2608301601170640100'],
+      shipment_id: 'CJ26083055424283816937',
+      payment_reference: 'CJ26083055424283816937',
     });
   });
 
@@ -433,6 +462,7 @@ describe('canonical order payment receipts', () => {
       .mockResolvedValueOnce(apiSuccess(childDetail({
         orderStatus: 'UNPAID',
         cjOrderCode: 'DP2608301601170640100',
+        cjOrderId: 'CJ26083055424283816937',
       })))
       .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })));
 
@@ -440,14 +470,14 @@ describe('canonical order payment receipts', () => {
 
     expectCanonicalReceipt(result, {
       ...expectedReceipt,
-      parent_code: 'DP2608301601170640100',
+      parent_code: 'CJ26083055424283816937',
       child_codes: ['DP2608301601170640100'],
-      shipment_id: 'DP2608301601170640100',
-      payment_reference: 'DP2608301601170640100',
+      shipment_id: 'CJ26083055424283816937',
+      payment_reference: 'CJ26083055424283816937',
     });
     expect(mockRequest).toHaveBeenCalledTimes(2);
     expect(mockRequest).toHaveBeenNthCalledWith(2, '/shopping/order/saveGenerateParentOrder', {
-      body: { shipmentOrderId: 'DP2608301601170640100' },
+      body: { shipmentOrderId: 'CJ26083055424283816937' },
       tier: 'write',
     });
   });
