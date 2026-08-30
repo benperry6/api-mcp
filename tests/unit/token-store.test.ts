@@ -2,10 +2,16 @@
  * @fileoverview Token 加密存储单元测试
  * 覆盖：加密存储、读取解密、清除、无token状态、测试环境明文备份文件
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { TokenStore } from '../../src/auth/token-store';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+
+const ORIGINAL_HOME = process.env.HOME;
+const TEST_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'cj-token-store-test-'));
+process.env.HOME = TEST_HOME;
+
+const { TokenStore } = await import('../../src/auth/token-store');
 
 const TOKEN_FILE = path.join(
   process.env.HOME || process.env.USERPROFILE || '.',
@@ -18,7 +24,7 @@ const TOKEN_FILE2 = path.join(
 );
 
 describe('TokenStore', () => {
-  let store: TokenStore;
+  let store: InstanceType<typeof TokenStore>;
 
   beforeEach(() => {
     // 清理之前的测试残留
@@ -33,6 +39,12 @@ describe('TokenStore', () => {
 
   afterEach(() => {
     store.clearToken();
+  });
+
+  afterAll(() => {
+    fs.rmSync(TEST_HOME, { recursive: true, force: true });
+    if (ORIGINAL_HOME === undefined) delete process.env.HOME;
+    else process.env.HOME = ORIGINAL_HOME;
   });
 
   it('无token时返回空字符串', () => {
