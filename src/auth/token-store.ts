@@ -65,13 +65,15 @@ export class TokenStore {
 
   setToken(token: string): void {
     const encrypted = this.encrypt(token);
-    fs.writeFileSync(TOKEN_FILE, encrypted, 'utf8');
+    fs.writeFileSync(TOKEN_FILE, encrypted, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(TOKEN_FILE, 0o600);
     /**
      * @note 纠正(78次): 测试环境额外写一份明文到 .cj-mcp-token2 供调试使用。
      * 生产环境跳过，防止 token 明文落盘泄露。
      */
     if (this.env === 'test') {
-      fs.writeFileSync(TOKEN_FILE2, token, 'utf8');
+      fs.writeFileSync(TOKEN_FILE2, token, { encoding: 'utf8', mode: 0o600 });
+      fs.chmodSync(TOKEN_FILE2, 0o600);
     }
   }
 

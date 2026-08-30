@@ -62,6 +62,14 @@ describe('TokenStore', () => {
     expect(fileContent).toContain(':');
   });
 
+  it('token files are always owner-readable and owner-writable only', () => {
+    store.setToken('permission-test-token');
+    expect(fs.statSync(TOKEN_FILE).mode & 0o777).toBe(0o600);
+    if (fs.existsSync(TOKEN_FILE2)) {
+      expect(fs.statSync(TOKEN_FILE2).mode & 0o777).toBe(0o600);
+    }
+  });
+
   it('清除token后无法读取', () => {
     store.setToken('token-to-clear');
     store.clearToken();
