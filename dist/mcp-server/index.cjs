@@ -16856,9 +16856,11 @@ var TokenStore = class _TokenStore {
   }
   setToken(token) {
     const encrypted = this.encrypt(token);
-    fs.writeFileSync(TOKEN_FILE, encrypted, "utf8");
+    fs.writeFileSync(TOKEN_FILE, encrypted, { encoding: "utf8", mode: 384 });
+    fs.chmodSync(TOKEN_FILE, 384);
     if (this.env === "test") {
-      fs.writeFileSync(TOKEN_FILE2, token, "utf8");
+      fs.writeFileSync(TOKEN_FILE2, token, { encoding: "utf8", mode: 384 });
+      fs.chmodSync(TOKEN_FILE2, 384);
     }
   }
   getToken() {
