@@ -646,7 +646,11 @@ function buildChildFinancialReceipt(
   });
   if (available.length === 0) return undefined;
   if (available.length !== fields.length) {
-    throw new Error('Invalid child financial receipt: all documented payType-3 amounts must be present together');
+    // createOrderV2 does not consistently return this optional child-level
+    // breakdown.  The authoritative parent receipt is produced later by
+    // saveGenerateParentOrder, so a partial optional child breakdown must not
+    // turn a successfully-created payment order into a reported failure.
+    return undefined;
   }
 
   return {
@@ -656,6 +660,107 @@ function buildChildFinancialReceipt(
     postage_amount: formatUsdCents(parseUsdCents(createOrderData.postageAmount, 'createOrderV2.postageAmount')),
     actual_payment: formatUsdCents(parseUsdCents(createOrderData.actualPayment, 'createOrderV2.actualPayment')),
     currency: 'USD',
+  };
+}
+
+type ExactOrderState = {
+  status: string;
+  childCode: string;
+  ownerId: unknown;
+};
+
+async function readExactOrderState(orderId: string): Promise<ExactOrderState> {
+  let response;
+  try {
+    response = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {
+      method: 'GET',
+      params: { orderId },
+      tier: 'read',
+    });
+  } catch (error: unknown) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Order-state read failed: getOrderDetail read failed: ${reason}`);
+  }
+  if (!isApiSuccess(response)) {
+    throw new Error(`Order-state read failed: getOrderDetail read failed: ${response.message}`);
+  }
+  const data = response.data;
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Order-state read failed: getOrderDetail data must be an object');
+  }
+  const detail = data as Record<string, unknown>;
+  const childCode = detail.cjOrderCode;
+  if (typeof childCode !== 'string' || !/^(?:DP|SD)[A-Za-z0-9]+$/.test(childCode)) {
+    throw new Error('Order-state read failed: cjOrderCode must be one exact identifier starting with DP or SD');
+  }
+  if (orderId !== childCode && detail.cjOrderId !== orderId) {
+    throw new Error('Order-state read failed: returned cjOrderId/cjOrderCode identity does not match the requested order');
+  }
+  return {
+    status: typeof detail.orderStatus === 'string' ? detail.orderStatus : '',
+    childCode,
+    ownerId: detail.cjOrderId,
+  };
+}
+
+async function canonicalPaymentReceiptWithRecovery(
+  parentData: Record<string, unknown>,
+  shipmentId: string,
+  webBase: string,
+  expectedChildCode?: string,
+  childFinancialReceipt?: ChildFinancialReceipt
+): Promise<CanonicalPaymentReceipt> {
+  let recovered = parentData;
+  const successOrders = recovered.successOrders;
+  if (successOrders == null || (Array.isArray(successOrders) && successOrders.length === 0)) {
+    if (expectedChildCode) {
+      const exactChildCode = exactReceiptId(expectedChildCode, 'expectedChildCode');
+      if (!/^(?:DP|SD)[A-Za-z0-9]+$/.test(exactChildCode)) {
+        throw new Error('Payment receipt recovery failed: expected child code must start with DP or SD');
+      }
+      recovered = { ...recovered, successOrders: [exactChildCode] };
+    } else {
+      const detail = await readExactOrderState(shipmentId);
+      if (detail.status !== 'UNPAID') {
+        throw new Error('Payment receipt recovery failed: orderStatus must be exactly UNPAID');
+      }
+      if (detail.ownerId !== shipmentId) {
+        throw new Error('Payment receipt recovery failed: cjOrderId must exactly match shipmentsId');
+      }
+      recovered = { ...recovered, successOrders: [detail.childCode] };
+    }
+  }
+  if (expectedChildCode) {
+    const childOrders = recovered.successOrders;
+    if (
+      !Array.isArray(childOrders)
+      || childOrders.length !== 1
+      || childOrders[0] !== expectedChildCode
+    ) {
+      throw new Error('Payment receipt recovery failed: parent child scope differs from the exact submitted order');
+    }
+  }
+  return buildCanonicalPaymentReceipt(
+    recovered,
+    shipmentId,
+    webBase,
+    childFinancialReceipt
+  );
+}
+
+async function resolveShipmentId(
+  confirmData: Record<string, unknown>,
+  orderId: string
+): Promise<{ shipmentId: string; childCode: string }> {
+  const rawShipmentId = typeof confirmData.shipmentsId === 'string'
+    ? confirmData.shipmentsId.trim()
+    : '';
+  const state = await readExactOrderState(orderId);
+  return {
+    // CJ's documented successful addCartConfirm response may return an empty
+    // shipmentsId. saveGenerateParentOrder accepts the exact child DP/SD code.
+    shipmentId: rawShipmentId || state.childCode,
+    childCode: state.childCode,
   };
 }
 
@@ -870,10 +975,8 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [Step3/addCartConfirm] 失败 / Failed: ${confirmResp.message}\n订单已创建 orderId: ${createdOrderId}` }], isError: true };
         }
         const confirmData = confirmResp.data as Record<string, unknown>;
-        const shipmentsId = String(confirmData?.shipmentsId ?? '');
-        if (!shipmentsId) {
-          return { content: [{ type: 'text', text: `❌ [Step3/addCartConfirm] 返回 shipmentsId 为空 / shipmentsId is empty\n订单已创建 orderId: ${createdOrderId}` }], isError: true };
-        }
+        const { shipmentId: shipmentsId, childCode: createdChildCode } =
+          await resolveShipmentId(confirmData, createdOrderId);
 
         // Step 4: saveGenerateParentOrder
         const parentOrderResp = await httpClient.request(ENDPOINTS.shopping.saveGenerateParentOrder, {
@@ -886,10 +989,11 @@ export async function handleOrderTool(
         const parentData = parentOrderResp.data as Record<string, unknown>;
         const webBase = getEnvConfig().webBase;
         const childFinancialReceipt = buildChildFinancialReceipt(orderData, rawInfo.payType);
-        const paymentReceipt = buildCanonicalPaymentReceipt(
+        const paymentReceipt = await canonicalPaymentReceiptWithRecovery(
           parentData,
           shipmentsId,
           webBase,
+          createdChildCode,
           childFinancialReceipt
         );
 
@@ -916,26 +1020,33 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: '❌ 请提供 orderId / Please provide orderId.' }], isError: true };
         }
         const sotcOrderId = String(args.orderId);
+        const sotcInitialState = await readExactOrderState(sotcOrderId);
+        let sotcShipmentsId = sotcInitialState.childCode;
+        const sotcChildCode = sotcInitialState.childCode;
 
-        const sotcCartResp = await httpClient.request(ENDPOINTS.shopping.addCart, {
-          body: { cjOrderIdList: [sotcOrderId] },
-          tier: 'write',
-        });
-        if (!isApiSuccess(sotcCartResp)) {
-          return { content: [{ type: 'text', text: `❌ [addCart] 失败 / Failed: ${sotcCartResp.message}\norderId: ${sotcOrderId}` }], isError: true };
-        }
+        // A retry after CJ has already created the unpaid parent must resume
+        // from that state. Replaying addCart is neither idempotent nor valid.
+        if (sotcInitialState.status !== 'UNPAID') {
+          const sotcCartResp = await httpClient.request(ENDPOINTS.shopping.addCart, {
+            body: { cjOrderIdList: [sotcOrderId] },
+            tier: 'write',
+          });
+          if (!isApiSuccess(sotcCartResp)) {
+            return { content: [{ type: 'text', text: `❌ [addCart] 失败 / Failed: ${sotcCartResp.message}\norderId: ${sotcOrderId}` }], isError: true };
+          }
 
-        const sotcConfirmResp = await httpClient.request(ENDPOINTS.shopping.addCartConfirm, {
-          body: { cjOrderIdList: [sotcOrderId] },
-          tier: 'write',
-        });
-        if (!isApiSuccess(sotcConfirmResp)) {
-          return { content: [{ type: 'text', text: `❌ [addCartConfirm] 失败 / Failed: ${sotcConfirmResp.message}\norderId: ${sotcOrderId}` }], isError: true };
-        }
-        const sotcConfirmData = sotcConfirmResp.data as Record<string, unknown>;
-        const sotcShipmentsId = String(sotcConfirmData?.shipmentsId ?? '');
-        if (!sotcShipmentsId) {
-          return { content: [{ type: 'text', text: `❌ [addCartConfirm] shipmentsId 为空 / shipmentsId is empty\norderId: ${sotcOrderId}` }], isError: true };
+          const sotcConfirmResp = await httpClient.request(ENDPOINTS.shopping.addCartConfirm, {
+            body: { cjOrderIdList: [sotcOrderId] },
+            tier: 'write',
+          });
+          if (!isApiSuccess(sotcConfirmResp)) {
+            return { content: [{ type: 'text', text: `❌ [addCartConfirm] 失败 / Failed: ${sotcConfirmResp.message}\norderId: ${sotcOrderId}` }], isError: true };
+          }
+          const resolved = await resolveShipmentId(
+            sotcConfirmResp.data as Record<string, unknown>,
+            sotcOrderId
+          );
+          sotcShipmentsId = resolved.shipmentId;
         }
 
         const sotcParentResp = await httpClient.request(ENDPOINTS.shopping.saveGenerateParentOrder, {
@@ -947,10 +1058,11 @@ export async function handleOrderTool(
         }
         const sotcParentData = sotcParentResp.data as Record<string, unknown>;
         const sotcWebBase = getEnvConfig().webBase;
-        const sotcPaymentReceipt = buildCanonicalPaymentReceipt(
+        const sotcPaymentReceipt = await canonicalPaymentReceiptWithRecovery(
           sotcParentData,
           sotcShipmentsId,
-          sotcWebBase
+          sotcWebBase,
+          sotcChildCode
         );
         return {
           content: [{
@@ -982,10 +1094,8 @@ export async function handleOrderTool(
           return { content: [{ type: 'text', text: `❌ [addCartConfirm] 失败 / Failed: ${ccpConfirmResp.message}\norderId: ${ccpOrderId}` }], isError: true };
         }
         const ccpConfirmData = ccpConfirmResp.data as Record<string, unknown>;
-        const ccpShipmentsId = String(ccpConfirmData?.shipmentsId ?? '');
-        if (!ccpShipmentsId) {
-          return { content: [{ type: 'text', text: `❌ [addCartConfirm] shipmentsId 为空 / shipmentsId is empty\norderId: ${ccpOrderId}` }], isError: true };
-        }
+        const { shipmentId: ccpShipmentsId, childCode: ccpChildCode } =
+          await resolveShipmentId(ccpConfirmData, ccpOrderId);
 
         const ccpParentResp = await httpClient.request(ENDPOINTS.shopping.saveGenerateParentOrder, {
           body: { shipmentOrderId: ccpShipmentsId },
@@ -996,10 +1106,11 @@ export async function handleOrderTool(
         }
         const ccpParentData = ccpParentResp.data as Record<string, unknown>;
         const ccpWebBase = getEnvConfig().webBase;
-        const ccpPaymentReceipt = buildCanonicalPaymentReceipt(
+        const ccpPaymentReceipt = await canonicalPaymentReceiptWithRecovery(
           ccpParentData,
           ccpShipmentsId,
-          ccpWebBase
+          ccpWebBase,
+          ccpChildCode
         );
         return {
           content: [{
@@ -1030,42 +1141,9 @@ export async function handleOrderTool(
         if (!isApiSuccess(gplParentResp)) {
           return { content: [{ type: 'text', text: `❌ [saveGenerateParentOrder] 失败 / Failed: ${gplParentResp.message}\nshipmentsId: ${gplShipmentsId}` }], isError: true };
         }
-        let gplData = gplParentResp.data as Record<string, unknown>;
-        const gplSuccessOrders = gplData.successOrders;
-        if (gplSuccessOrders == null || (Array.isArray(gplSuccessOrders) && gplSuccessOrders.length === 0)) {
-          let gplDetailResp;
-          try {
-            gplDetailResp = await httpClient.request(ENDPOINTS.shopping.getOrderDetail, {
-              method: 'GET',
-              params: { orderId: gplShipmentsId },
-              tier: 'read',
-            });
-          } catch (error: unknown) {
-            const reason = error instanceof Error ? error.message : String(error);
-            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${reason}`);
-          }
-          if (!isApiSuccess(gplDetailResp)) {
-            throw new Error(`Payment receipt recovery failed: getOrderDetail read failed: ${gplDetailResp.message}`);
-          }
-          const gplDetail = gplDetailResp.data;
-          if (!gplDetail || typeof gplDetail !== 'object' || Array.isArray(gplDetail)) {
-            throw new Error('Payment receipt recovery failed: getOrderDetail data must be an object');
-          }
-          const gplDetailData = gplDetail as Record<string, unknown>;
-          if (gplDetailData.orderStatus !== 'UNPAID') {
-            throw new Error('Payment receipt recovery failed: orderStatus must be exactly UNPAID');
-          }
-          if (gplDetailData.cjOrderId !== gplShipmentsId) {
-            throw new Error('Payment receipt recovery failed: cjOrderId must exactly match shipmentsId');
-          }
-          const gplChildCode = gplDetailData.cjOrderCode;
-          if (typeof gplChildCode !== 'string' || !/^(?:DP|SD)[A-Za-z0-9]+$/.test(gplChildCode)) {
-            throw new Error('Payment receipt recovery failed: cjOrderCode must be one exact non-empty identifier starting with DP or SD');
-          }
-          gplData = { ...gplData, successOrders: [gplChildCode] };
-        }
+        const gplData = gplParentResp.data as Record<string, unknown>;
         const gplWebBase = getEnvConfig().webBase;
-        const gplPaymentReceipt = buildCanonicalPaymentReceipt(
+        const gplPaymentReceipt = await canonicalPaymentReceiptWithRecovery(
           gplData,
           gplShipmentsId,
           gplWebBase
