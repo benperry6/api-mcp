@@ -689,12 +689,17 @@ async function readExactOrderState(orderId: string): Promise<ExactOrderState> {
     throw new Error('Order-state read failed: getOrderDetail data must be an object');
   }
   const detail = data as Record<string, unknown>;
+  const internalOrderId = detail.orderId;
   const childCode = detail.cjOrderCode;
   if (typeof childCode !== 'string' || !/^(?:DP|SD)[A-Za-z0-9]+$/.test(childCode)) {
     throw new Error('Order-state read failed: cjOrderCode must be one exact identifier starting with DP or SD');
   }
-  if (orderId !== childCode && detail.cjOrderId !== orderId) {
-    throw new Error('Order-state read failed: returned cjOrderId/cjOrderCode identity does not match the requested order');
+  if (
+    internalOrderId !== orderId
+    && childCode !== orderId
+    && detail.cjOrderId !== orderId
+  ) {
+    throw new Error('Order-state read failed: returned orderId/cjOrderId/cjOrderCode identity does not match the requested order');
   }
   return {
     status: typeof detail.orderStatus === 'string' ? detail.orderStatus : '',

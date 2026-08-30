@@ -452,6 +452,43 @@ describe('canonical order payment receipts', () => {
     });
   });
 
+  it('accepts the exact internal orderId returned by getOrderDetail', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail({
+        orderId: '2608300801300651000',
+        cjOrderId: null,
+        cjOrderCode: 'DP2608300801270659900',
+      })))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-SHIP-1' }))
+      .mockResolvedValueOnce(apiSuccess(childDetail({
+        orderId: '2608300801300651000',
+        cjOrderId: null,
+        cjOrderCode: 'DP2608300801270659900',
+      })))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({
+        successOrders: ['DP2608300801270659900'],
+      })));
+
+    const result = await handleOrderTool('submit_order_to_cart', {
+      orderId: '2608300801300651000',
+    });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      child_codes: ['DP2608300801270659900'],
+    });
+    expect(mockRequest).toHaveBeenNthCalledWith(1, '/shopping/order/getOrderDetail', {
+      method: 'GET',
+      params: { orderId: '2608300801300651000' },
+      tier: 'read',
+    });
+    expect(mockRequest).toHaveBeenNthCalledWith(2, '/shopping/order/addCart', {
+      body: { cjOrderIdList: ['2608300801300651000'] },
+      tier: 'write',
+    });
+  });
+
   it('fails closed when a single-order parent receipt names a different child', async () => {
     mockRequest
       .mockResolvedValueOnce(apiSuccess(childDetail({ orderStatus: 'UNPAID' })))
