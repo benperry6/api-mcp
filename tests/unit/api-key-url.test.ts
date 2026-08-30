@@ -44,6 +44,7 @@ vi.mock('../../src/config/env', () => ({
 
 // 动态 import 确保 mock 先行
 const { getSession, setSessionDirect, clearSession, cleanupExpiredApiKeySessions, ensureAccessToken, isSessionValid } = await import('../../src/auth/session');
+const { httpClient } = await import('../../src/api-client/http-client');
 
 function makeSession(email: string): SessionData {
   return {
@@ -60,6 +61,86 @@ describe('apiKey URL 认证 — 会话隔离', () => {
   beforeEach(() => {
     // 重置：无 apiKey 上下文下清除 currentSession
     clearSession();
+    delete process.env.CJ_API_KEY;
+    vi.mocked(httpClient.request).mockReset();
+  });
+
+  it('expired local session recovers automatically from the approved environment API key', async () => {
+    process.env.CJ_API_KEY = 'approved-environment-key';
+    vi.mocked(httpClient.request).mockResolvedValueOnce({
+      result: true,
+      message: 'ok',
+      data: {
+        openId: 123,
+        accessToken: 'fresh-access-token',
+        accessTokenExpiryDate: new Date(Date.now() + 3600_000).toISOString(),
+        refreshToken: 'fresh-refresh-token',
+        refreshTokenExpiryDate: new Date(Date.now() + 86400_000).toISOString(),
+      },
+    });
+
+    await expect(ensureAccessToken()).resolves.toBe('fresh-access-token');
+    expect(httpClient.request).toHaveBeenCalledTimes(1);
+    expect(httpClient.request).toHaveBeenCalledWith(
+      '/authentication/getAccessToken',
+      expect.objectContaining({ body: { apiKey: 'approved-environment-key' }, skipAuth: true }),
+    );
+  });
+
+  it('does not invent a recovery route when no environment API key is configured', async () => {
+    await expect(ensureAccessToken()).resolves.toBeNull();
+    expect(httpClient.request).not.toHaveBeenCalled();
+  });
+
+  it('never substitutes the local environment account inside a remote apiKey context', async () => {
+    process.env.CJ_API_KEY = 'local-account-key';
+
+    await apiKeyStorage.run('remote-tenant-key', async () => {
+      await expect(ensureAccessToken()).resolves.toBeNull();
+    });
+    expect(httpClient.request).not.toHaveBeenCalled();
+  });
+
+  it('returns null on failed environment authentication and permits a later retry', async () => {
+    process.env.CJ_API_KEY = 'approved-environment-key';
+    vi.mocked(httpClient.request)
+      .mockResolvedValueOnce({ result: false, message: 'expired key', data: null })
+      .mockResolvedValueOnce({
+        result: true,
+        message: 'ok',
+        data: {
+          openId: 123,
+          accessToken: 'recovered-on-retry',
+          accessTokenExpiryDate: new Date(Date.now() + 3600_000).toISOString(),
+          refreshToken: 'retry-refresh-token',
+          refreshTokenExpiryDate: new Date(Date.now() + 86400_000).toISOString(),
+        },
+      });
+
+    await expect(ensureAccessToken()).resolves.toBeNull();
+    await expect(ensureAccessToken()).resolves.toBe('recovered-on-retry');
+    expect(httpClient.request).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces concurrent expired-session recovery into one authentication request', async () => {
+    process.env.CJ_API_KEY = 'approved-environment-key';
+    vi.mocked(httpClient.request).mockResolvedValueOnce({
+      result: true,
+      message: 'ok',
+      data: {
+        openId: 123,
+        accessToken: 'one-fresh-token',
+        accessTokenExpiryDate: new Date(Date.now() + 3600_000).toISOString(),
+        refreshToken: 'one-refresh-token',
+        refreshTokenExpiryDate: new Date(Date.now() + 86400_000).toISOString(),
+      },
+    });
+
+    await expect(Promise.all([ensureAccessToken(), ensureAccessToken()])).resolves.toEqual([
+      'one-fresh-token',
+      'one-fresh-token',
+    ]);
+    expect(httpClient.request).toHaveBeenCalledTimes(1);
   });
 
   it('apiKey 上下文下 setSessionDirect 后 getSession 可取到 session', async () => {

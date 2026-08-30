@@ -80,6 +80,7 @@ export interface SessionData {
 const tokenStore = TokenStore.getInstance();
 
 let currentSession: SessionData | null = null;
+let environmentSessionRecovery: Promise<string | null> | null = null;
 
 export function getSession(): SessionData | null {
   // 直接 Token 模式（/mcp/API@userId@CJ:token）：无内存存储，返回合成 session
@@ -273,5 +274,30 @@ export async function ensureAccessToken(): Promise<string | null> {
     return getAccessToken();
   }
 
-  return null;
+  // Never substitute the server's local account for a request-scoped remote
+  // apiKey tenant. URL modes must recover only from their own URL credential.
+  if (getContextApiKey() !== undefined) return null;
+
+  // Local stdio deployments may provide the approved CJ API key through the
+  // process environment. When the persisted refresh token is fully expired,
+  // recreate the normal OpenAPI session instead of forcing an interactive
+  // browser login. Coalesce concurrent tool calls so one expiry produces one
+  // authentication request and one persisted replacement session.
+  const apiKey = process.env.CJ_API_KEY?.trim();
+  if (!apiKey) return null;
+
+  if (!environmentSessionRecovery) {
+    environmentSessionRecovery = (async () => {
+      try {
+        await createSession('environment-api-key', apiKey);
+        return getAccessToken();
+      } catch {
+        return null;
+      } finally {
+        environmentSessionRecovery = null;
+      }
+    })();
+  }
+
+  return environmentSessionRecovery;
 }
