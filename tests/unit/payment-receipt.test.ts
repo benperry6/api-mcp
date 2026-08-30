@@ -70,6 +70,17 @@ const expectedReceipt = {
   hosted_url: 'https://cjdropshipping.example/mine/payment?pid=PAY%2F123',
 };
 
+const childDetail = (overrides: Record<string, unknown> = {}) => ({
+  orderStatus: 'CREATED',
+  cjOrderId: 'ORDER-1',
+  cjOrderCode: 'DP2608301601170640100',
+  ...overrides,
+});
+const expectedSingleReceipt = {
+  ...expectedReceipt,
+  child_codes: ['DP2608301601170640100'],
+};
+
 function expectCanonicalReceipt(
   result: Awaited<ReturnType<typeof handleOrderTool>>,
   expected: Record<string, unknown> = expectedReceipt
@@ -192,22 +203,25 @@ describe('canonical order payment receipts', () => {
   it('returns the same canonical receipt from confirm_cart_and_pay', async () => {
     mockRequest
       .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-SHIP-1' }))
-      .mockResolvedValueOnce(apiSuccess(parentFinance()));
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: ['DP2608301601170640100'] })));
 
     const result = await handleOrderTool('confirm_cart_and_pay', { orderId: 'ORDER-1' });
 
-    expectCanonicalReceipt(result);
+    expectCanonicalReceipt(result, expectedSingleReceipt);
   });
 
   it('returns the same canonical receipt from submit_order_to_cart', async () => {
     mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
       .mockResolvedValueOnce(apiSuccess())
       .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-SHIP-1' }))
-      .mockResolvedValueOnce(apiSuccess(parentFinance()));
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: ['DP2608301601170640100'] })));
 
     const result = await handleOrderTool('submit_order_to_cart', { orderId: 'ORDER-1' });
 
-    expectCanonicalReceipt(result);
+    expectCanonicalReceipt(result, expectedSingleReceipt);
   });
 
   it('returns parent and documented payType-3 child finance from create_order', async () => {
@@ -222,14 +236,15 @@ describe('canonical order payment receipts', () => {
       }))
       .mockResolvedValueOnce(apiSuccess())
       .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-SHIP-1' }))
-      .mockResolvedValueOnce(apiSuccess(parentFinance()));
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: ['DP2608301601170640100'] })));
 
     const result = await handleOrderTool('create_order', {
       orderInfo: { orderNumber: 'STORE-1', payType: 3 },
     });
 
     expectCanonicalReceipt(result, {
-      ...expectedReceipt,
+      ...expectedSingleReceipt,
       child_financial_receipt: {
         ioss_amount: '1.40',
         ioss_tax_handling_fee: '0.30',
@@ -374,18 +389,79 @@ describe('canonical order payment receipts', () => {
     expect(result.content[0].text).toContain('iossAmount');
   });
 
-  it('rejects partial payType-3 child finance', async () => {
+  it('keeps the authoritative parent receipt when optional payType-3 child finance is partial', async () => {
     mockRequest
       .mockResolvedValueOnce(apiSuccess({ orderId: 'ORDER-1', productAmount: '10.10' }))
       .mockResolvedValueOnce(apiSuccess())
       .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-SHIP-1' }))
-      .mockResolvedValueOnce(apiSuccess(parentFinance()));
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: ['DP2608301601170640100'] })));
 
     const result = await handleOrderTool('create_order', {
       orderInfo: { orderNumber: 'STORE-1', payType: 3 },
     });
 
+    expectCanonicalReceipt(result, expectedSingleReceipt);
+    expect(result.structuredContent?.payment_receipt).not.toHaveProperty('child_financial_receipt');
+  });
+
+  it('uses the exact child code when successful addCartConfirm returns an empty shipmentsId', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ shipmentsId: '' }))
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })));
+
+    const result = await handleOrderTool('submit_order_to_cart', { orderId: 'DP2608301601170640100' });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      parent_code: 'DP2608301601170640100',
+      child_codes: ['DP2608301601170640100'],
+      shipment_id: 'DP2608301601170640100',
+      payment_reference: 'DP2608301601170640100',
+    });
+    expect(mockRequest).toHaveBeenNthCalledWith(5, '/shopping/order/saveGenerateParentOrder', {
+      body: { shipmentOrderId: 'DP2608301601170640100' },
+      tier: 'write',
+    });
+  });
+
+  it('resumes an already UNPAID child without replaying addCart or addCartConfirm', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail({
+        orderStatus: 'UNPAID',
+        cjOrderCode: 'DP2608301601170640100',
+      })))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: [] })));
+
+    const result = await handleOrderTool('submit_order_to_cart', { orderId: 'DP2608301601170640100' });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      parent_code: 'DP2608301601170640100',
+      child_codes: ['DP2608301601170640100'],
+      shipment_id: 'DP2608301601170640100',
+      payment_reference: 'DP2608301601170640100',
+    });
+    expect(mockRequest).toHaveBeenCalledTimes(2);
+    expect(mockRequest).toHaveBeenNthCalledWith(2, '/shopping/order/saveGenerateParentOrder', {
+      body: { shipmentOrderId: 'DP2608301601170640100' },
+      tier: 'write',
+    });
+  });
+
+  it('fails closed when a single-order parent receipt names a different child', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail({ orderStatus: 'UNPAID' })))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({ successOrders: ['DP9999999999999999999'] })));
+
+    const result = await handleOrderTool('submit_order_to_cart', { orderId: 'DP2608301601170640100' });
+
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain('child financial receipt');
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content[0].text).toContain('child scope');
+    expect(mockRequest).toHaveBeenCalledTimes(2);
   });
 });
