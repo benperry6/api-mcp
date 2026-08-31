@@ -4,6 +4,9 @@
  * 描述参考 mycj-react 中购物车、下单、合单的业务场景
  */
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { createHash } from 'node:crypto';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { httpClient, AuthExpiredError, isApiSuccess } from '../../api-client/http-client.js';
 import { ENDPOINTS, API_VERSION_PREFIX } from '../../api-client/endpoints.js';
 import { ensureAccessToken } from '../../auth/session.js';
@@ -125,10 +128,15 @@ export const orderTools: Tool[] = [
           type: 'string',
           description: 'createOrderV2 返回的 CJ 订单ID（必填）/ CJ order ID from createOrderV2 (required)',
         },
-        recoveryOrderInfo: {
+        recoveryOrderInfoFile: {
           type: 'object',
           description:
-            'Exact canonical create_order payload used only when an imported DP order is authoritatively rejected by cart confirmation and remains CREATED.',
+            'Opaque owner-generated recovery descriptor. Contains only a fixed-path file reference and SHA-256; never inline recipient data.',
+          properties: {
+            path: { type: 'string' },
+            sha256: { type: 'string' },
+          },
+          required: ['path', 'sha256'],
         },
       },
       required: ['orderId'],
@@ -757,9 +765,9 @@ function exactRecoveryOrderInfo(value: unknown): Record<string, unknown> | undef
   const requiredStrings = [
     'orderNumber',
     'shippingCustomerName',
+    'shippingPhone',
     'shippingCountry',
     'shippingCountryCode',
-    'shippingProvince',
     'shippingCity',
     'shippingAddress',
     'logisticName',
@@ -768,6 +776,7 @@ function exactRecoveryOrderInfo(value: unknown): Record<string, unknown> | undef
   if (requiredStrings.some(key => typeof orderInfo[key] !== 'string' || String(orderInfo[key]).trim() === '')) {
     return undefined;
   }
+  if (typeof orderInfo.shippingProvince !== 'string') return undefined;
   if (!Array.isArray(orderInfo.products) || orderInfo.products.length === 0) return undefined;
   const validProducts = orderInfo.products.every(product => {
     if (!product || typeof product !== 'object' || Array.isArray(product)) return false;
@@ -777,6 +786,37 @@ function exactRecoveryOrderInfo(value: unknown): Record<string, unknown> | undef
     return hasIdentifier && typeof row.quantity === 'number' && row.quantity > 0;
   });
   return validProducts ? orderInfo : undefined;
+}
+
+const DEFAULT_RECOVERY_ORDER_INFO_ROOT =
+  '/home/hermes/vault/ops/paenma/cj-payment-lifecycle/recovery-order-info';
+
+function recoveryOrderInfoFromFile(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const descriptor = value as Record<string, unknown>;
+  if (typeof descriptor.path !== 'string' || typeof descriptor.sha256 !== 'string') return undefined;
+  if (!/^[a-f0-9]{64}$/.test(descriptor.sha256)) return undefined;
+  const configuredRoot = process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT
+    || DEFAULT_RECOVERY_ORDER_INFO_ROOT;
+  const root = realpathSync(configuredRoot);
+  const requested = resolve(descriptor.path);
+  if (dirname(requested) !== root || requested !== join(root, `${descriptor.sha256}.json`)) {
+    return undefined;
+  }
+  const stats = lstatSync(requested);
+  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 0o777) !== 0o600) {
+    return undefined;
+  }
+  if (typeof process.getuid === 'function' && stats.uid !== process.getuid()) return undefined;
+  if (realpathSync(requested) !== requested) return undefined;
+  const raw = readFileSync(requested);
+  const digest = createHash('sha256').update(raw).digest('hex');
+  if (digest !== descriptor.sha256) return undefined;
+  try {
+    return exactRecoveryOrderInfo(JSON.parse(raw.toString('utf8')));
+  } catch {
+    return undefined;
+  }
 }
 
 async function canonicalPaymentReceiptWithRecovery(
@@ -1142,7 +1182,8 @@ export async function handleOrderTool(
             );
           } catch (error) {
             if (error instanceof ImportedOrderCartIncompatibleError) {
-              const recoveryOrderInfo = exactRecoveryOrderInfo(args.recoveryOrderInfo);
+              const recoveryOrderInfo = recoveryOrderInfoFromFile(args.recoveryOrderInfoFile)
+                || exactRecoveryOrderInfo(args.recoveryOrderInfo);
               if (recoveryOrderInfo) {
                 return handleOrderTool('create_order', { orderInfo: recoveryOrderInfo });
               }

@@ -2,6 +2,10 @@
  * @fileoverview Canonical payment-receipt regression tests for CJ order flows.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 vi.mock('../../src/auth/session', () => ({
   ensureAccessToken: vi.fn().mockResolvedValue('mock-token'),
@@ -461,6 +465,7 @@ describe('canonical order payment receipts', () => {
     const recoveryOrderInfo = {
       orderNumber: 'PAENMA-BERCEAU-DES-REVES-1889',
       shippingCustomerName: 'Test Customer',
+      shippingPhone: '+33600000000',
       shippingCountry: 'France',
       shippingCountryCode: 'FR',
       shippingProvince: 'Paris',
@@ -470,6 +475,13 @@ describe('canonical order payment receipts', () => {
       fromCountryCode: 'CN',
       products: [{ vid: '2607030726331617900', quantity: 1 }],
     };
+    const recoveryRoot = mkdtempSync(join(tmpdir(), 'paenma-recovery-'));
+    const raw = `${JSON.stringify(recoveryOrderInfo)}\n`;
+    const sha256 = createHash('sha256').update(raw).digest('hex');
+    const recoveryPath = join(recoveryRoot, `${sha256}.json`);
+    writeFileSync(recoveryPath, raw, { mode: 0o600 });
+    chmodSync(recoveryPath, 0o600);
+    process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT = recoveryRoot;
     mockRequest
       .mockResolvedValueOnce(apiSuccess(childDetail()))
       .mockResolvedValueOnce(apiSuccess())
@@ -488,10 +500,16 @@ describe('canonical order payment receipts', () => {
         successOrders: ['SD2608310000000000001'],
       })));
 
-    const result = await handleOrderTool('submit_order_to_cart', {
-      orderId: 'DP2608301601170640100',
-      recoveryOrderInfo,
-    });
+    let result;
+    try {
+      result = await handleOrderTool('submit_order_to_cart', {
+        orderId: 'DP2608301601170640100',
+        recoveryOrderInfoFile: { path: recoveryPath, sha256 },
+      });
+    } finally {
+      delete process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT;
+      rmSync(recoveryRoot, { recursive: true, force: true });
+    }
 
     expectCanonicalReceipt(result, {
       ...expectedReceipt,
@@ -537,6 +555,35 @@ describe('canonical order payment receipts', () => {
         products: [{ quantity: 1 }],
       },
     });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('DP_CART_INCOMPATIBLE');
+    expect(mockRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects a recovery file whose path and digest are not owner-bound', async () => {
+    const recoveryRoot = mkdtempSync(join(tmpdir(), 'paenma-recovery-'));
+    const raw = `${JSON.stringify({ orderNumber: 'unsafe' })}\n`;
+    const actual = createHash('sha256').update(raw).digest('hex');
+    const recoveryPath = join(recoveryRoot, `${actual}.json`);
+    writeFileSync(recoveryPath, raw, { mode: 0o600 });
+    process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT = recoveryRoot;
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ result: 3, submitSuccess: false, shipmentsId: null }))
+      .mockResolvedValueOnce(apiSuccess(childDetail()));
+
+    let result;
+    try {
+      result = await handleOrderTool('submit_order_to_cart', {
+        orderId: 'DP2608301601170640100',
+        recoveryOrderInfoFile: { path: recoveryPath, sha256: '0'.repeat(64) },
+      });
+    } finally {
+      delete process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT;
+      rmSync(recoveryRoot, { recursive: true, force: true });
+    }
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('DP_CART_INCOMPATIBLE');
