@@ -2980,7 +2980,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve4.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3007,7 +3007,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve4(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3638,7 +3638,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve4(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const resolved = resolveComponent(parse3(baseURI, schemelessOptions), parse3(relativeURI, schemelessOptions), schemelessOptions, true);
       schemelessOptions.skipEscape = true;
@@ -3896,7 +3896,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve4,
       resolveComponent,
       equal,
       serialize,
@@ -14211,7 +14211,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error2) {
@@ -14228,7 +14228,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const earlyReject = (error2) => {
         reject(error2);
       };
@@ -14306,7 +14306,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve4(parseResult.data);
           }
         } catch (error2) {
           reject(error2);
@@ -14567,12 +14567,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve4, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -15442,12 +15442,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const json = serializeMessage(message);
       if (this._stdout.write(json)) {
-        resolve3();
+        resolve4();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve4);
       }
     });
   }
@@ -15946,7 +15946,7 @@ var responseViaResponseObject = async (res, outgoing, options = {}) => {
         });
         if (!chunk) {
           if (i === 1) {
-            await new Promise((resolve3) => setTimeout(resolve3));
+            await new Promise((resolve4) => setTimeout(resolve4));
             maxReadCount = 3;
             continue;
           }
@@ -16446,9 +16446,9 @@ data:
       const initRequest = messages.find((m) => isInitializeRequest(m));
       const clientProtocolVersion = initRequest ? initRequest.params.protocolVersion : req.headers.get("mcp-protocol-version") ?? DEFAULT_NEGOTIATED_PROTOCOL_VERSION;
       if (this._enableJsonResponse) {
-        return new Promise((resolve3) => {
+        return new Promise((resolve4) => {
           this._streamMapping.set(streamId, {
-            resolveJson: resolve3,
+            resolveJson: resolve4,
             cleanup: () => {
               this._streamMapping.delete(streamId);
             }
@@ -16781,8 +16781,8 @@ var StreamableHTTPServerTransport = class {
 // src/mcp-server/index.ts
 var import_node_http = require("node:http");
 var import_node_https = require("node:https");
-var import_node_fs = require("node:fs");
-var import_node_path = require("node:path");
+var import_node_fs2 = require("node:fs");
+var import_node_path2 = require("node:path");
 
 // src/mcp-server/tools/auth.tool.ts
 var import_crypto2 = require("crypto");
@@ -16977,10 +16977,10 @@ var ConcurrencySemaphore = class {
       this.current++;
       return;
     }
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       this.queue.push(() => {
         this.current++;
-        resolve3();
+        resolve4();
       });
     });
   }
@@ -17062,7 +17062,7 @@ var RateLimiter = class {
       const tierWait = tierBucket.getWaitTime();
       const globalWait = this.globalBucket.getWaitTime();
       const waitTime = Math.max(tierWait, globalWait, 50);
-      await new Promise((resolve3) => setTimeout(resolve3, waitTime));
+      await new Promise((resolve4) => setTimeout(resolve4, waitTime));
     }
   }
   /**
@@ -17447,7 +17447,7 @@ var HttpClient = class {
         }
         const delay = rateLimiter.getRetryDelay(attempt);
         logger.rateLimit(tier, "retrying", `attempt=${attempt + 1} delay=${delay}ms endpoint=${endpoint}`);
-        await new Promise((resolve3) => setTimeout(resolve3, delay));
+        await new Promise((resolve4) => setTimeout(resolve4, delay));
       }
     }
     throw new Error(`Request failed: ${endpoint}`);
@@ -17896,7 +17896,7 @@ async function handleAuthTool(name, args) {
               _meta: buildLoginUiMeta()
             };
           }
-          await new Promise((resolve3) => setTimeout(resolve3, pollIntervalMs));
+          await new Promise((resolve4) => setTimeout(resolve4, pollIntervalMs));
         }
         return {
           content: [{
@@ -19719,6 +19719,9 @@ ${url}
 }
 
 // src/mcp-server/tools/order.tool.ts
+var import_node_crypto = require("node:crypto");
+var import_node_fs = require("node:fs");
+var import_node_path = require("node:path");
 var orderTools = [
   {
     name: "add_to_cart",
@@ -19802,9 +19805,14 @@ var orderTools = [
           type: "string",
           description: "createOrderV2 \u8FD4\u56DE\u7684 CJ \u8BA2\u5355ID\uFF08\u5FC5\u586B\uFF09/ CJ order ID from createOrderV2 (required)"
         },
-        recoveryOrderInfo: {
+        recoveryOrderInfoFile: {
           type: "object",
-          description: "Exact canonical create_order payload used only when an imported DP order is authoritatively rejected by cart confirmation and remains CREATED."
+          description: "Opaque owner-generated recovery descriptor. Contains only a fixed-path file reference and SHA-256; never inline recipient data.",
+          properties: {
+            path: { type: "string" },
+            sha256: { type: "string" }
+          },
+          required: ["path", "sha256"]
         }
       },
       required: ["orderId"]
@@ -20233,7 +20241,7 @@ async function waitForUnpaidOwnerShipment(orderId, attempts = 10, delayMs = 1e3)
   let lastState;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (attempt > 0) {
-      await new Promise((resolve3) => setTimeout(resolve3, delayMs));
+      await new Promise((resolve4) => setTimeout(resolve4, delayMs));
     }
     lastState = await readExactOrderState(orderId);
     if (lastState.status === "UNPAID") {
@@ -20257,9 +20265,9 @@ function exactRecoveryOrderInfo(value) {
   const requiredStrings = [
     "orderNumber",
     "shippingCustomerName",
+    "shippingPhone",
     "shippingCountry",
     "shippingCountryCode",
-    "shippingProvince",
     "shippingCity",
     "shippingAddress",
     "logisticName",
@@ -20268,6 +20276,7 @@ function exactRecoveryOrderInfo(value) {
   if (requiredStrings.some((key) => typeof orderInfo[key] !== "string" || String(orderInfo[key]).trim() === "")) {
     return void 0;
   }
+  if (typeof orderInfo.shippingProvince !== "string") return void 0;
   if (!Array.isArray(orderInfo.products) || orderInfo.products.length === 0) return void 0;
   const validProducts = orderInfo.products.every((product) => {
     if (!product || typeof product !== "object" || Array.isArray(product)) return false;
@@ -20276,6 +20285,33 @@ function exactRecoveryOrderInfo(value) {
     return hasIdentifier && typeof row.quantity === "number" && row.quantity > 0;
   });
   return validProducts ? orderInfo : void 0;
+}
+var DEFAULT_RECOVERY_ORDER_INFO_ROOT = "/home/hermes/vault/ops/paenma/cj-payment-lifecycle/recovery-order-info";
+function recoveryOrderInfoFromFile(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const descriptor = value;
+  if (typeof descriptor.path !== "string" || typeof descriptor.sha256 !== "string") return void 0;
+  if (!/^[a-f0-9]{64}$/.test(descriptor.sha256)) return void 0;
+  const configuredRoot = process.env.PAENMA_RECOVERY_ORDER_INFO_ROOT || DEFAULT_RECOVERY_ORDER_INFO_ROOT;
+  const root = (0, import_node_fs.realpathSync)(configuredRoot);
+  const requested = (0, import_node_path.resolve)(descriptor.path);
+  if ((0, import_node_path.dirname)(requested) !== root || requested !== (0, import_node_path.join)(root, `${descriptor.sha256}.json`)) {
+    return void 0;
+  }
+  const stats = (0, import_node_fs.lstatSync)(requested);
+  if (!stats.isFile() || stats.isSymbolicLink() || (stats.mode & 511) !== 384) {
+    return void 0;
+  }
+  if (typeof process.getuid === "function" && stats.uid !== process.getuid()) return void 0;
+  if ((0, import_node_fs.realpathSync)(requested) !== requested) return void 0;
+  const raw = (0, import_node_fs.readFileSync)(requested);
+  const digest = (0, import_node_crypto.createHash)("sha256").update(raw).digest("hex");
+  if (digest !== descriptor.sha256) return void 0;
+  try {
+    return exactRecoveryOrderInfo(JSON.parse(raw.toString("utf8")));
+  } catch {
+    return void 0;
+  }
 }
 async function canonicalPaymentReceiptWithRecovery(parentData, shipmentId, webBase, expectedChildCode, childFinancialReceipt) {
   let recovered = parentData;
@@ -20590,7 +20626,7 @@ orderId: ${sotcOrderId}` }], isError: true };
             );
           } catch (error2) {
             if (error2 instanceof ImportedOrderCartIncompatibleError) {
-              const recoveryOrderInfo = exactRecoveryOrderInfo(args.recoveryOrderInfo);
+              const recoveryOrderInfo = recoveryOrderInfoFromFile(args.recoveryOrderInfoFile) || exactRecoveryOrderInfo(args.recoveryOrderInfo);
               if (recoveryOrderInfo) {
                 return handleOrderTool("create_order", { orderInfo: recoveryOrderInfo });
               }
@@ -22340,9 +22376,9 @@ async function main() {
       res.end("Not Found");
     };
     if (transportType === "https") {
-      const certPath = (0, import_node_path.resolve)(process.env.CJ_HTTPS_CERT || "certs/cert.pem");
-      const keyPath = (0, import_node_path.resolve)(process.env.CJ_HTTPS_KEY || "certs/key.pem");
-      if (!(0, import_node_fs.existsSync)(certPath) || !(0, import_node_fs.existsSync)(keyPath)) {
+      const certPath = (0, import_node_path2.resolve)(process.env.CJ_HTTPS_CERT || "certs/cert.pem");
+      const keyPath = (0, import_node_path2.resolve)(process.env.CJ_HTTPS_KEY || "certs/key.pem");
+      if (!(0, import_node_fs2.existsSync)(certPath) || !(0, import_node_fs2.existsSync)(keyPath)) {
         console.error(`[MCP] \u274C \u627E\u4E0D\u5230 HTTPS \u8BC1\u4E66\u6587\u4EF6\u3002\u8BF7\u5148\u8FD0\u884C: npm run gen:cert`);
         console.error(`[MCP]    \u8BC1\u4E66\u8DEF\u5F84: ${certPath}`);
         console.error(`[MCP]    \u79C1\u94A5\u8DEF\u5F84: ${keyPath}`);
@@ -22351,8 +22387,8 @@ async function main() {
       }
       const httpsServer = (0, import_node_https.createServer)(
         {
-          cert: (0, import_node_fs.readFileSync)(certPath),
-          key: (0, import_node_fs.readFileSync)(keyPath)
+          cert: (0, import_node_fs2.readFileSync)(certPath),
+          key: (0, import_node_fs2.readFileSync)(keyPath)
         },
         requestHandler
       );
