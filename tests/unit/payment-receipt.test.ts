@@ -457,6 +457,92 @@ describe('canonical order payment receipts', () => {
     });
   });
 
+  it('falls back once to an exact manual order when an imported DP cannot become unpaid', async () => {
+    const recoveryOrderInfo = {
+      orderNumber: 'PAENMA-BERCEAU-DES-REVES-1889',
+      shippingCustomerName: 'Test Customer',
+      shippingCountry: 'France',
+      shippingCountryCode: 'FR',
+      shippingProvince: 'Paris',
+      shippingCity: 'Paris',
+      shippingAddress: '1 Test Street',
+      logisticName: 'YunExpress Ordinary',
+      fromCountryCode: 'CN',
+      products: [{ vid: '2607030726331617900', quantity: 1 }],
+    };
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ result: 3, submitSuccess: false, shipmentsId: null }))
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess({ orderId: 'MANUAL-ORDER-1' }))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ shipmentsId: 'CJ-MANUAL-SHIP-1' }))
+      .mockResolvedValueOnce(apiSuccess({
+        orderId: 'MANUAL-ORDER-1',
+        orderStatus: 'UNPAID',
+        cjOrderId: 'CJ-MANUAL-SHIP-1',
+        cjOrderCode: 'SD2608310000000000001',
+      }))
+      .mockResolvedValueOnce(apiSuccess(parentFinance({
+        successOrders: ['SD2608310000000000001'],
+      })));
+
+    const result = await handleOrderTool('submit_order_to_cart', {
+      orderId: 'DP2608301601170640100',
+      recoveryOrderInfo,
+    });
+
+    expectCanonicalReceipt(result, {
+      ...expectedReceipt,
+      child_codes: ['SD2608310000000000001'],
+      parent_code: 'CJ-MANUAL-SHIP-1',
+      shipment_id: 'CJ-MANUAL-SHIP-1',
+      payment_reference: 'CJ-MANUAL-SHIP-1',
+    });
+    expect(mockRequest).toHaveBeenNthCalledWith(5, '/shopping/order/createOrderV2', {
+      body: recoveryOrderInfo,
+      tier: 'write',
+    });
+    expect(mockRequest).toHaveBeenCalledTimes(9);
+  });
+
+  it('fails explicitly without creating a manual order when exact recovery data is absent', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ result: 3, submitSuccess: false, shipmentsId: null }))
+      .mockResolvedValueOnce(apiSuccess(childDetail()));
+
+    const result = await handleOrderTool('submit_order_to_cart', {
+      orderId: 'DP2608301601170640100',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('DP_CART_INCOMPATIBLE');
+    expect(mockRequest).toHaveBeenCalledTimes(4);
+  });
+
+  it('rejects incomplete recovery data instead of creating a guessed manual order', async () => {
+    mockRequest
+      .mockResolvedValueOnce(apiSuccess(childDetail()))
+      .mockResolvedValueOnce(apiSuccess())
+      .mockResolvedValueOnce(apiSuccess({ result: 3, submitSuccess: false, shipmentsId: null }))
+      .mockResolvedValueOnce(apiSuccess(childDetail()));
+
+    const result = await handleOrderTool('submit_order_to_cart', {
+      orderId: 'DP2608301601170640100',
+      recoveryOrderInfo: {
+        orderNumber: 'PAENMA-BERCEAU-DES-REVES-1889',
+        products: [{ quantity: 1 }],
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('DP_CART_INCOMPATIBLE');
+    expect(mockRequest).toHaveBeenCalledTimes(4);
+  });
+
   it('resumes an already UNPAID child without replaying addCart or addCartConfirm', async () => {
     mockRequest
       .mockResolvedValueOnce(apiSuccess(childDetail({
