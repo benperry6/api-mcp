@@ -19801,6 +19801,10 @@ var orderTools = [
         orderId: {
           type: "string",
           description: "createOrderV2 \u8FD4\u56DE\u7684 CJ \u8BA2\u5355ID\uFF08\u5FC5\u586B\uFF09/ CJ order ID from createOrderV2 (required)"
+        },
+        recoveryOrderInfo: {
+          type: "object",
+          description: "Exact canonical create_order payload used only when an imported DP order is authoritatively rejected by cart confirmation and remains CREATED."
         }
       },
       required: ["orderId"]
@@ -20241,6 +20245,38 @@ async function waitForUnpaidOwnerShipment(orderId, attempts = 10, delayMs = 1e3)
     `Cart confirmation did not become UNPAID after ${attempts} authoritative readbacks`
   );
 }
+var ImportedOrderCartIncompatibleError = class extends Error {
+  constructor() {
+    super("DP_CART_INCOMPATIBLE: imported DP order was rejected by cart confirmation and remained CREATED");
+    this.name = "ImportedOrderCartIncompatibleError";
+  }
+};
+function exactRecoveryOrderInfo(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return void 0;
+  const orderInfo = value;
+  const requiredStrings = [
+    "orderNumber",
+    "shippingCustomerName",
+    "shippingCountry",
+    "shippingCountryCode",
+    "shippingProvince",
+    "shippingCity",
+    "shippingAddress",
+    "logisticName",
+    "fromCountryCode"
+  ];
+  if (requiredStrings.some((key) => typeof orderInfo[key] !== "string" || String(orderInfo[key]).trim() === "")) {
+    return void 0;
+  }
+  if (!Array.isArray(orderInfo.products) || orderInfo.products.length === 0) return void 0;
+  const validProducts = orderInfo.products.every((product) => {
+    if (!product || typeof product !== "object" || Array.isArray(product)) return false;
+    const row = product;
+    const hasIdentifier = typeof row.vid === "string" && row.vid.trim() !== "" || typeof row.sku === "string" && row.sku.trim() !== "";
+    return hasIdentifier && typeof row.quantity === "number" && row.quantity > 0;
+  });
+  return validProducts ? orderInfo : void 0;
+}
 async function canonicalPaymentReceiptWithRecovery(parentData, shipmentId, webBase, expectedChildCode, childFinancialReceipt) {
   let recovered = parentData;
   const successOrders = recovered.successOrders;
@@ -20278,8 +20314,11 @@ async function canonicalPaymentReceiptWithRecovery(parentData, shipmentId, webBa
 async function resolveShipmentId(confirmData, orderId) {
   const rawShipmentId = typeof confirmData.shipmentsId === "string" ? confirmData.shipmentsId.trim() : "";
   const explicitFailure = confirmData.submitSuccess === false || typeof confirmData.result === "number" && confirmData.result !== 0;
-  const state = rawShipmentId ? await readExactOrderState(orderId) : await waitForUnpaidOwnerShipment(orderId);
+  const state = rawShipmentId ? await readExactOrderState(orderId) : explicitFailure ? await readExactOrderState(orderId) : await waitForUnpaidOwnerShipment(orderId);
   if (explicitFailure && state.status !== "UNPAID") {
+    if (state.childCode.startsWith("DP") && state.status === "CREATED") {
+      throw new ImportedOrderCartIncompatibleError();
+    }
     throw new Error("Cart confirmation was rejected and no exact UNPAID parent was created");
   }
   return {
@@ -20543,10 +20582,21 @@ orderId: ${sotcOrderId}` }], isError: true };
             return { content: [{ type: "text", text: `\u274C [addCartConfirm] \u5931\u8D25 / Failed: ${sotcConfirmResp.message}
 orderId: ${sotcOrderId}` }], isError: true };
           }
-          const resolved = await resolveShipmentId(
-            sotcConfirmResp.data,
-            sotcOrderId
-          );
+          let resolved;
+          try {
+            resolved = await resolveShipmentId(
+              sotcConfirmResp.data,
+              sotcOrderId
+            );
+          } catch (error2) {
+            if (error2 instanceof ImportedOrderCartIncompatibleError) {
+              const recoveryOrderInfo = exactRecoveryOrderInfo(args.recoveryOrderInfo);
+              if (recoveryOrderInfo) {
+                return handleOrderTool("create_order", { orderInfo: recoveryOrderInfo });
+              }
+            }
+            throw error2;
+          }
           sotcShipmentsId = resolved.shipmentId;
         }
         const sotcParentResp = await httpClient.request(ENDPOINTS.shopping.saveGenerateParentOrder, {
