@@ -125,6 +125,11 @@ export const orderTools: Tool[] = [
           type: 'string',
           description: 'createOrderV2 返回的 CJ 订单ID（必填）/ CJ order ID from createOrderV2 (required)',
         },
+        recoveryOrderInfo: {
+          type: 'object',
+          description:
+            'Exact canonical create_order payload used only when an imported DP order is authoritatively rejected by cart confirmation and remains CREATED.',
+        },
       },
       required: ['orderId'],
     },
@@ -739,6 +744,41 @@ async function waitForUnpaidOwnerShipment(
   );
 }
 
+class ImportedOrderCartIncompatibleError extends Error {
+  constructor() {
+    super('DP_CART_INCOMPATIBLE: imported DP order was rejected by cart confirmation and remained CREATED');
+    this.name = 'ImportedOrderCartIncompatibleError';
+  }
+}
+
+function exactRecoveryOrderInfo(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const orderInfo = value as Record<string, unknown>;
+  const requiredStrings = [
+    'orderNumber',
+    'shippingCustomerName',
+    'shippingCountry',
+    'shippingCountryCode',
+    'shippingProvince',
+    'shippingCity',
+    'shippingAddress',
+    'logisticName',
+    'fromCountryCode',
+  ];
+  if (requiredStrings.some(key => typeof orderInfo[key] !== 'string' || String(orderInfo[key]).trim() === '')) {
+    return undefined;
+  }
+  if (!Array.isArray(orderInfo.products) || orderInfo.products.length === 0) return undefined;
+  const validProducts = orderInfo.products.every(product => {
+    if (!product || typeof product !== 'object' || Array.isArray(product)) return false;
+    const row = product as Record<string, unknown>;
+    const hasIdentifier = (typeof row.vid === 'string' && row.vid.trim() !== '')
+      || (typeof row.sku === 'string' && row.sku.trim() !== '');
+    return hasIdentifier && typeof row.quantity === 'number' && row.quantity > 0;
+  });
+  return validProducts ? orderInfo : undefined;
+}
+
 async function canonicalPaymentReceiptWithRecovery(
   parentData: Record<string, unknown>,
   shipmentId: string,
@@ -795,8 +835,13 @@ async function resolveShipmentId(
     || (typeof confirmData.result === 'number' && confirmData.result !== 0);
   const state = rawShipmentId
     ? await readExactOrderState(orderId)
-    : await waitForUnpaidOwnerShipment(orderId);
+    : explicitFailure
+      ? await readExactOrderState(orderId)
+      : await waitForUnpaidOwnerShipment(orderId);
   if (explicitFailure && state.status !== 'UNPAID') {
+    if (state.childCode.startsWith('DP') && state.status === 'CREATED') {
+      throw new ImportedOrderCartIncompatibleError();
+    }
     throw new Error('Cart confirmation was rejected and no exact UNPAID parent was created');
   }
   return {
@@ -1089,10 +1134,21 @@ export async function handleOrderTool(
           if (!isApiSuccess(sotcConfirmResp)) {
             return { content: [{ type: 'text', text: `❌ [addCartConfirm] 失败 / Failed: ${sotcConfirmResp.message}\norderId: ${sotcOrderId}` }], isError: true };
           }
-          const resolved = await resolveShipmentId(
-            sotcConfirmResp.data as Record<string, unknown>,
-            sotcOrderId
-          );
+          let resolved: { shipmentId: string; childCode: string };
+          try {
+            resolved = await resolveShipmentId(
+              sotcConfirmResp.data as Record<string, unknown>,
+              sotcOrderId
+            );
+          } catch (error) {
+            if (error instanceof ImportedOrderCartIncompatibleError) {
+              const recoveryOrderInfo = exactRecoveryOrderInfo(args.recoveryOrderInfo);
+              if (recoveryOrderInfo) {
+                return handleOrderTool('create_order', { orderInfo: recoveryOrderInfo });
+              }
+            }
+            throw error;
+          }
           sotcShipmentsId = resolved.shipmentId;
         }
 
