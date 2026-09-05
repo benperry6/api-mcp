@@ -17,6 +17,8 @@ export interface ApiResponse<T = unknown> {
   message: string;
   data: T;
   requestId?: string;
+  pointsInfo?: Record<string, unknown>;
+  httpStatus?: number;
   /** 部分接口 (shop/getShops, product/globalWarehouseList) 用 success 代替 result */
   success?: boolean;
 }
@@ -37,6 +39,10 @@ export interface RequestOptions {
   tier?: RateTier;
   /** 是否跳过 token 注入 (用于 auth 接口) */
   skipAuth?: boolean;
+  /** Expensive discovery calls must not replay an uncertain request. */
+  retry?: boolean;
+  /** Preserve endpoint-specific authorization/quota errors and HTTP status. */
+  preserveErrors?: boolean;
 }
 
 /** Token 获取函数类型，由外部注入避免循环依赖 */
@@ -74,7 +80,7 @@ export class HttpClient {
    */
   async request<T = unknown>(endpoint: string, options: RequestOptions = {}): Promise<ApiResponse<T>> {
     const { method = 'POST', body, params, tier = 'read', skipAuth = false } = options;
-    const maxRetries = rateLimiter.getMaxRetries();
+    const maxRetries = options.retry === false ? 0 : rateLimiter.getMaxRetries();
 
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
@@ -119,6 +125,7 @@ export class HttpClient {
         const startTime = Date.now();
         const response = await fetch(url.toString(), fetchOptions);
         const data: ApiResponse<T> = await response.json();
+        if (options.preserveErrors) data.httpStatus = response.status;
         const duration = Date.now() - startTime;
 
         // 请求日志
@@ -129,7 +136,7 @@ export class HttpClient {
         }
 
         // 401 / token 过期处理
-        if (data.code === 1600100 || data.code === 401) {
+        if (!options.preserveErrors && (data.code === 1600100 || data.code === 401)) {
           throw new AuthExpiredError('Token expired. Please re-login via the login tool. / Token已过期，请重新调用登录工具。');
         }
 

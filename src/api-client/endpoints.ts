@@ -17,6 +17,7 @@ export const ENDPOINTS = {
   // === Product ===
   product: {
     query: '/product/query',
+    queryProductsByImage: '/product/queryProductsByImage',
     listV2: '/product/listV2',
     getCategory: '/product/getCategory',
     globalWarehouseList: '/product/globalWarehouseList',

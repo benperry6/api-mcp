@@ -48,6 +48,42 @@ vi.mock('../../src/api-client/http-client', () => ({
   setTokenGetter: vi.fn(),
 }));
 
+describe('image discovery', () => {
+  beforeEach(() => mockRequest.mockReset());
+  it('is read-only, preserves all candidates and provider quota metadata', async () => {
+    const response = { code: 200, result: true, message: 'Success', data: Array.from({ length: 43 }, (_, id) => ({ id: String(id), materialEn: '["Wood"]' })), requestId: 'receipt', pointsInfo: { total: 50000, usedToday: 1000, remaining: 49000 } };
+    mockRequest.mockResolvedValue(response);
+    const result = await handleProductTool('search_products_by_image', { imageUrl: 'https://cdn.shopify.com/product.jpg' });
+    expect(JSON.parse(result.content[0].text as string)).toEqual(response);
+    expect(mockRequest).toHaveBeenCalledExactlyOnceWith('/product/queryProductsByImage', { method: 'POST', body: { imageUrl: 'https://cdn.shopify.com/product.jpg' }, tier: 'read', retry: false, preserveErrors: true });
+    expect(getProductTools().find(t => t.name === 'search_products_by_image')?.annotations?.readOnlyHint).toBe(true);
+  });
+  it('treats empty successful results as success', async () => {
+    mockRequest.mockResolvedValue({ code: 200, result: true, data: [] });
+    const result = await handleProductTool('search_products_by_image', { imageUrl: 'https://example.com/image.jpg' });
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text as string).data).toEqual([]);
+  });
+  it.each([
+    { code: 401, result: false, message: 'Unauthorized', requestId: 'denied' },
+    { code: 1600100, result: false, message: 'Token expired', requestId: 'expired' },
+    { code: 429, result: false, message: 'Quota exceeded', pointsInfo: { remaining: 0 } },
+    { code: 200, result: false, message: 'Provider failure' },
+    { code: 200, result: true, httpStatus: 429, message: 'HTTP quota' },
+  ])('preserves provider error without interpreting it as login failure', async response => {
+    mockRequest.mockResolvedValue(response);
+    const result = await handleProductTool('search_products_by_image', { imageUrl: 'https://example.com/image.jpg' });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text as string)).toEqual(response);
+    expect(mockRequest).toHaveBeenCalledTimes(1);
+  });
+  it.each([undefined, '', 12, 'not a URL', 'file:///image.jpg', 'data:image/png;base64,x', 'https://localhost/a', 'http://127.0.0.1/a', 'https://user:password@example.com/a', 'https://example.com/' + 'a'.repeat(500)])('rejects malformed input before requesting CJ', async imageUrl => {
+    const result = await handleProductTool('search_products_by_image', { imageUrl });
+    expect(result.isError).toBe(true);
+    expect(mockRequest).not.toHaveBeenCalled();
+  });
+});
+
 // Mock resources/index 以便控制 getProductListCache / getProductDetailCache 返回值
 const mockGetProductListCache = vi.fn();
 const mockGetProductDetailCache = vi.fn();
@@ -61,13 +97,13 @@ vi.mock('../../src/mcp-server/resources/index', () => ({
   setOrderDetailCache: vi.fn(),
 }));
 
-import { handleProductTool, productTools } from '../../src/mcp-server/tools/product.tool';
+import { handleProductTool, productTools, getProductTools } from '../../src/mcp-server/tools/product.tool';
 
 describe('product.tool', () => {
   beforeEach(() => mockRequest.mockClear());
 
   it('注册了15个tools（search_products, get_category_tree, get_warehouses, get_product_detail, query_cj_inventory, get_my_products, get_product_variants, create_sourcing, query_sourcing, list_product_connections, get_product_reviews, create_product_connection, disconnect_product, show_product_list, show_product_detail）', () => {
-    expect(productTools).toHaveLength(15);
+    expect(productTools).toHaveLength(16);
     expect(productTools.map(t => t.name)).toContain('search_products');
     expect(productTools.map(t => t.name)).toContain('get_product_detail');
     expect(productTools.map(t => t.name)).toContain('query_cj_inventory');

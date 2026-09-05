@@ -17120,6 +17120,7 @@ var ENDPOINTS = {
   // === Product ===
   product: {
     query: "/product/query",
+    queryProductsByImage: "/product/queryProductsByImage",
     listV2: "/product/listV2",
     getCategory: "/product/getCategory",
     globalWarehouseList: "/product/globalWarehouseList",
@@ -17396,7 +17397,7 @@ var HttpClient = class {
    */
   async request(endpoint, options = {}) {
     const { method = "POST", body, params, tier = "read", skipAuth = false } = options;
-    const maxRetries = rateLimiter.getMaxRetries();
+    const maxRetries = options.retry === false ? 0 : rateLimiter.getMaxRetries();
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         await rateLimiter.acquire(tier);
@@ -17428,12 +17429,13 @@ var HttpClient = class {
         const startTime2 = Date.now();
         const response = await fetch(url.toString(), fetchOptions);
         const data = await response.json();
+        if (options.preserveErrors) data.httpStatus = response.status;
         const duration3 = Date.now() - startTime2;
         logger.request(method, url.toString(), data.code, duration3);
         if (isDebugMode()) {
           logger.debug("HTTP", `\u539F\u59CB\u54CD\u5E94 / Response data: ${endpoint}`, data);
         }
-        if (data.code === 1600100 || data.code === 401) {
+        if (!options.preserveErrors && (data.code === 1600100 || data.code === 401)) {
           throw new AuthExpiredError("Token expired. Please re-login via the login tool. / Token\u5DF2\u8FC7\u671F\uFF0C\u8BF7\u91CD\u65B0\u8C03\u7528\u767B\u5F55\u5DE5\u5177\u3002");
         }
         return data;
@@ -18419,6 +18421,16 @@ async function fetchOrderListFallback() {
 setTokenGetter(() => getAccessToken());
 var productTools = [
   {
+    name: "search_products_by_image",
+    description: "Find visually similar on-sale CJ catalog products from a publicly accessible HTTP(S) image URL. Requires approved Level 3+ access. Costs 1000 points per request; never automatically retried. Returns the complete API envelope, including every candidate, requestId and pointsInfo when supplied. Candidate summaries are not mapping proof: inspect get_product_detail and all get_product_variants before comparing materials, dimensions, pack and accessories. Does not create connections or change products.",
+    inputSchema: {
+      type: "object",
+      properties: { imageUrl: { type: "string", maxLength: 500, description: "Public HTTP(S) image URL, at most 500 characters." } },
+      required: ["imageUrl"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "search_products",
     description: '\u641C\u7D22CJ\u5E73\u53F0\u4E0A\u5DF2\u6709\u7684\u5546\u54C1\u76EE\u5F55\uFF0C\u652F\u6301\u5173\u952E\u8BCD\u3001\u5206\u7C7B\u3001\u4EF7\u683C\u3001\u56FD\u5BB6\u3001\u4ED3\u5E93\u7C7B\u578B\u7B49\u591A\u7EF4\u5EA6\u7B5B\u9009\u3002\n\u3010\u4E24\u6B65\u5C55\u793A\u6D41\u7A0B - \u5FC5\u987B\u6309\u987A\u5E8F\u6267\u884C\u3011\n  \u7B2C1\u6B65\uFF1A\u5148\u8C03\u7528\u672C\u5DE5\u5177 search_products \u83B7\u53D6\u6700\u65B0\u6570\u636E\n  \u7B2C2\u6B65\uFF1A\u518D\u8C03\u7528 show_product_list \u6253\u5F00\u53EF\u89C6\u5316\u5361\u7247\u754C\u9762\uFF08\u6570\u636E\u5DF2\u7F13\u5B58\uFF09\n\u26A0\uFE0F \u672C\u5DE5\u5177\u4EC5\u83B7\u53D6\u6570\u636E\uFF0C\u4E0D\u6E32\u67D3 UI\uFF1BUI \u6E32\u67D3\u7531 show_product_list \u72EC\u7ACB\u5B8C\u6210\u3002\n\u26A0\uFE0F \u4E0D\u8981\u5C1D\u8BD5\u5728\u672C\u5DE5\u5177\u7684\u8FD4\u56DE\u7ED3\u679C\u4E2D\u6CE8\u5165 _meta.ui\uFF0C\u90A3\u6837\u4F1A\u5BFC\u81F4 UI \u5728\u6570\u636E\u5230\u8FBE\u524D\u5C31\u6E32\u67D3\uFF08\u65E7\u6570\u636E\uFF09\u3002\n\u3010\u610F\u56FE\u6620\u5C04\u89C4\u5219\u3011\n- \u7528\u6237\u8BF4\u300C\u5168\u7403\u4ED3\u5546\u54C1\u300D\u300C\u7F8E\u56FD\u4ED3\u5546\u54C1\u300D\u300C\u7F8E\u56FD\u4ED3\u300D\u300CUS\u4ED3\u300D\u2192 isWarehouse=true, countryCode=US\n- \u7528\u6237\u8BF4\u300C\u4E2D\u56FD\u4ED3\u5546\u54C1\u300D\u300CCN\u4ED3\u5546\u54C1\u300D\u2192 isWarehouse=true, countryCode=CN\n- \u7528\u6237\u8BF4\u300C\u5168\u7403\u4ED3\u300D\u4E0D\u6307\u5B9A\u56FD\u5BB6 \u2192 isWarehouse=true\n- \u7528\u6237\u8BF4\u300C\u627E\u624B\u673A\u58F3\u300D\u300C\u641C\u4E00\u4E0B\u9F20\u6807\u300D\u2192 keyword=\u5BF9\u5E94\u5173\u952E\u8BCD\uFF08\u652F\u6301\u4E2D\u82F1\u6587\uFF09\n- \u7528\u6237\u8BF4\u300C50\u7F8E\u5143\u4EE5\u5185\u7684XX\u300D\u2192 keyword=XX, maxPrice=50\n- \u7528\u6237\u8BF4\u300C\u514D\u8D39\u914D\u9001\u300D\u300C\u5305\u90AE\u300D\u2192 addMarkStatus=1\n- \u7528\u6237\u8BF4\u300C\u6309\u4EF7\u683C\u4ECE\u4F4E\u5230\u9AD8\u300D\u2192 orderBy=2, sort=asc\n- \u7528\u6237\u8BF4\u300C\u7ED9\u6211\u770B\u66F4\u591A\u300D\u300C\u4E0B\u4E00\u9875\u300D\u2192 pageNum \u9012\u589E\n- \u7528\u6237\u8BF4\u300C\u524DN\u6761\u300D\u300CN\u6761\u6570\u636E\u300D\u300CN\u4E2A\u5546\u54C1\u300D\u2192 pageSize=N\uFF08\u672A\u6307\u5B9A\u65F6\u9ED8\u8BA4 pageSize=20\uFF09\n- \u7528\u6237\u8BF4\u300C\u6211\u81EA\u5DF1\u7684\u5907\u8D27\u300D\u300C\u6211\u7684\u79C1\u6709\u5E93\u5B58\u300D\u300C\u6211\u5165\u5E93\u7684\u5546\u54C1\u300D\u2192 \u4F7F\u7528 query_private_inventory\n\u26A0\uFE0F\u3010\u641C\u54C1 vs \u641C\u7D22\u5546\u54C1 \u533A\u5206\u3011\n- \u6B64\u5DE5\u5177\u4EC5\u641C\u7D22 CJ \u5E73\u53F0**\u73B0\u6709\u5546\u54C1\u76EE\u5F55**\u4E2D\u7684\u5546\u54C1\n- \u82E5\u7528\u6237\u8BF4\u300C\u5E2E\u6211\u641C\u54C1\u300D\u300C\u6211\u60F3\u8BA9CJ\u5E2E\u6211\u627E\u8D27\u6E90\u300D\u300C\u63D0\u4EA4\u641C\u54C1\u9700\u6C42\u300D\u300C\u8FD9\u4E2A\u5546\u54C1CJ\u6709\u6CA1\u6709\u4EE3\u53D1\u300D\u300C\u6211\u57281688/\u901F\u5356\u901A/\u963F\u91CC\u770B\u5230\u4E00\u4E2A\u5546\u54C1\uFF0C\u5E2E\u6211\u627E\u300D\u2192 \u4F7F\u7528 create_sourcing\uFF08\u4E0D\u662F\u6B64\u5DE5\u5177\uFF09\n\u3010Two-step display - MUST call in order\u3011\n  Step1: Call this tool (search_products) to fetch data\n  Step2: Call show_product_list to render the visual card UI (data already cached)\n\u26A0\uFE0F This tool fetches data ONLY; UI rendering is done by show_product_list separately.\nSearch EXISTING products in CJ catalog.\n[Intent mapping] "US warehouse" \u2192 isWarehouse=true, countryCode=US;\n"my own stock/private inventory" \u2192 use query_private_inventory instead.\n[NOT for] "sourcing request" / "find product not on CJ" / "I found this on 1688, can CJ source it?" \u2192 use create_sourcing.',
     inputSchema: {
@@ -18837,6 +18849,7 @@ var lastProductDetailPid = "";
 var productUriSeq = 0;
 var READ_ONLY_PRODUCT_TOOLS = /* @__PURE__ */ new Set([
   "search_products",
+  "search_products_by_image",
   "get_category_tree",
   "get_warehouses",
   "get_product_detail",
@@ -18883,6 +18896,8 @@ async function handleProductTool(name, args) {
   }
   try {
     switch (name) {
+      case "search_products_by_image":
+        return await handleSearchProductsByImage(args);
       case "search_products":
         return await handleSearchProducts(args);
       case "get_category_tree":
@@ -18949,6 +18964,29 @@ async function handleProductTool(name, args) {
     const msg = error2 instanceof Error ? error2.message : String(error2);
     return { content: [{ type: "text", text: `Error: ${msg}` }], isError: true };
   }
+}
+async function handleSearchProductsByImage(args) {
+  const imageUrl = args.imageUrl;
+  let valid = typeof imageUrl === "string" && imageUrl.length > 0 && imageUrl.length <= 500 && imageUrl.trim() === imageUrl;
+  try {
+    const url = new URL(String(imageUrl));
+    const host = url.hostname.toLowerCase();
+    valid = valid && ["http:", "https:"].includes(url.protocol) && !url.username && !url.password && host.includes(".") && !host.endsWith(".localhost") && !host.endsWith(".local") && !/^\d+(\.\d+){3}$/.test(host);
+  } catch {
+    valid = false;
+  }
+  if (!valid || Object.keys(args).some((key) => key !== "imageUrl")) {
+    return { content: [{ type: "text", text: "Provide only imageUrl: a public HTTP(S) image URL (maximum 500 characters), without credentials or local/IP hosts." }], isError: true };
+  }
+  const response = await httpClient.request(ENDPOINTS.product.queryProductsByImage, {
+    method: "POST",
+    body: { imageUrl },
+    tier: "read",
+    retry: false,
+    preserveErrors: true
+  });
+  const failed = response.result === false || response.success === false || response.httpStatus !== void 0 && response.httpStatus >= 400 || !isApiSuccess(response);
+  return { content: [{ type: "text", text: JSON.stringify(response, null, 2) }], ...failed ? { isError: true } : {} };
 }
 async function handleSearchProducts(args) {
   const params = {};

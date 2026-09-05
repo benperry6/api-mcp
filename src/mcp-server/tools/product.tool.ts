@@ -24,6 +24,16 @@ setTokenGetter(() => getAccessToken());
 
 export const productTools: Tool[] = [
   {
+    name: 'search_products_by_image',
+    description: 'Find visually similar on-sale CJ catalog products from a publicly accessible HTTP(S) image URL. Requires approved Level 3+ access. Costs 1000 points per request; never automatically retried. Returns the complete API envelope, including every candidate, requestId and pointsInfo when supplied. Candidate summaries are not mapping proof: inspect get_product_detail and all get_product_variants before comparing materials, dimensions, pack and accessories. Does not create connections or change products.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: { imageUrl: { type: 'string', maxLength: 500, description: 'Public HTTP(S) image URL, at most 500 characters.' } },
+      required: ['imageUrl'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'search_products',
     description:
       '搜索CJ平台上已有的商品目录，支持关键词、分类、价格、国家、仓库类型等多维度筛选。\n' +
@@ -549,7 +559,7 @@ let productUriSeq = 0;
  * - readOnlyHint 仅注入只读工具（避免 ChatGPT 每次调用都弹确认框）
  */
 const READ_ONLY_PRODUCT_TOOLS = new Set([
-  'search_products', 'get_category_tree', 'get_warehouses', 'get_product_detail',
+  'search_products', 'search_products_by_image', 'get_category_tree', 'get_warehouses', 'get_product_detail',
   'query_cj_inventory', 'get_my_products', 'get_product_variants',
   'query_sourcing', 'list_product_connections', 'get_product_reviews',
 ]);
@@ -612,6 +622,8 @@ export async function handleProductTool(
 
   try {
     switch (name) {
+      case 'search_products_by_image':
+        return await handleSearchProductsByImage(args);
       case 'search_products':
         return await handleSearchProducts(args);
       case 'get_category_tree':
@@ -685,6 +697,29 @@ export async function handleProductTool(
     const msg = error instanceof Error ? error.message : String(error);
     return { content: [{ type: 'text', text: `Error: ${msg}` }], isError: true };
   }
+}
+
+async function handleSearchProductsByImage(args: Record<string, unknown>) {
+  const imageUrl = args.imageUrl;
+  let valid = typeof imageUrl === 'string' && imageUrl.length > 0 && imageUrl.length <= 500 && imageUrl.trim() === imageUrl;
+  try {
+    const url = new URL(String(imageUrl));
+    const host = url.hostname.toLowerCase();
+    valid = valid && ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password
+      && host.includes('.') && !host.endsWith('.localhost') && !host.endsWith('.local')
+      && !/^\d+(\.\d+){3}$/.test(host);
+  } catch { valid = false; }
+  if (!valid || Object.keys(args).some(key => key !== 'imageUrl')) {
+    return { content: [{ type: 'text', text: 'Provide only imageUrl: a public HTTP(S) image URL (maximum 500 characters), without credentials or local/IP hosts.' }], isError: true };
+  }
+  const response = await httpClient.request(ENDPOINTS.product.queryProductsByImage, {
+    method: 'POST', body: { imageUrl }, tier: 'read', retry: false, preserveErrors: true,
+  });
+  // 401 on this endpoint is a documented whitelist denial, not proof of token expiry.
+  // Preserve provider codes/message verbatim so explicit token errors remain distinguishable.
+  const failed = response.result === false || response.success === false
+    || (response.httpStatus !== undefined && response.httpStatus >= 400) || !isApiSuccess(response);
+  return { content: [{ type: 'text', text: JSON.stringify(response, null, 2) }], ...(failed ? { isError: true } : {}) };
 }
 
 async function handleSearchProducts(args: Record<string, unknown>) {
@@ -1123,4 +1158,3 @@ async function handleDisconnectProduct(args: Record<string, unknown>) {
   }
   return { content: [{ type: 'text', text: `✅ 商品连接已断开 / Product disconnected.\n${JSON.stringify(response.data, null, 2)}` }] };
 }
-

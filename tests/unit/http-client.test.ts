@@ -121,6 +121,22 @@ describe('HttpClient', () => {
     expect(options.body).toBeUndefined();
   });
 
+  it.each([401, 429])('preserves HTTP %s and provider envelope for discovery without replay', async status => {
+    const envelope = { code: status, result: false, message: status === 401 ? 'Unauthorized' : 'Quota exceeded', data: null, requestId: 'receipt', pointsInfo: { remaining: 0 } };
+    mockFetch.mockResolvedValue({ status, json: async () => envelope });
+    expect(await client.request('/product/queryProductsByImage', { retry: false, preserveErrors: true })).toEqual({ ...envelope, httpStatus: status });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not replay expensive calls after uncertain network or non-JSON failures', async () => {
+    mockFetch.mockRejectedValue(new Error('Network interrupted'));
+    await expect(client.request('/product/queryProductsByImage', { retry: false, preserveErrors: true })).rejects.toThrow('Network interrupted');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    mockFetch.mockReset().mockResolvedValue({ status: 502, json: async () => { throw new Error('Invalid JSON'); } });
+    await expect(client.request('/product/queryProductsByImage', { retry: false, preserveErrors: true })).rejects.toThrow('Invalid JSON');
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it('params 附加到 URL query string', async () => {
     mockFetch.mockResolvedValueOnce({
       json: () => Promise.resolve({ code: 200, result: true, data: {} }),
